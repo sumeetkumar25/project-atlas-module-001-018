@@ -1,0 +1,7 @@
+# atlas/modules/module009_trade_excursion/__init__.py
+"""
+Module 009: Maximum Favorable / Adverse Excursion
+Measures profit potential vs risk for pullback entries.
+
+Chain: Module 005 → 007 → 008 → 009
+"""

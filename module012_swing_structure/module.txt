@@ -1,0 +1,292 @@
+# atlas/modules/module012_swing_structure/module.py
+"""
+Module 012: Swing Structure Analysis - Phase 1.1
+
+Detects fractal swing highs and swing lows using the reusable
+FractalDetector from atlas.core.pattern_detection.
+
+Definition (frozen):
+  Swing High: High(i) > High(i-k..i-1) AND High(i) > High(i+1..i+k)
+  Swing Low:  Low(i)  < Low(i-k..i-1)  AND Low(i)  < Low(i+1..i+k)
+
+Uses future bars for confirmation (research-only, not trading signals).
+"""
+
+from typing import Dict, Any, Optional
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.core.pattern_detection import FractalDetector
+from atlas.framework.registry import AtlasRegistry
+
+from .config import (
+    MODULE_ID, MODULE_NAME, MODULE_VERSION,
+    SWING_STRENGTH, MIN_SWING_DISTANCE, CONFIRMATION_LAG,
+)
+from .protocol import PROTOCOL
+
+MODULE_INFO = {
+    "id": MODULE_ID, "name": MODULE_NAME, "version": MODULE_VERSION,
+    "author": "Project Atlas",
+    "phase": "Phase 1.1 - Swing Detection",
+    "requires": ["000"],
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": ["swing_points", "swing_statistics", "swing_summary"],
+    "status": "Research In Progress - Phase 1.1",
+    "swing_definition": "Fractal (k=2), uses future bars for confirmation",
+    "detector": "atlas.core.pattern_detection.FractalDetector",
+}
+
+
+class SwingStructureResearch(BaseResearchModule):
+    """
+    Module 012: Swing Structure Analysis - Phase 1.1
+    
+    Detects swing highs and swing lows using fractal definition.
+    Measures swing amplitude, duration, and sequence patterns.
+    """
+    
+    PROTOCOL = PROTOCOL
+    MODULE_INFO = MODULE_INFO
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(module_name=MODULE_NAME, module_version=MODULE_VERSION)
+        self.registry = registry or AtlasRegistry()
+        existing = self.registry.get_module(MODULE_ID)
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        self.detector = FractalDetector(strength=SWING_STRENGTH)
+        self.swing_points: Optional[pd.DataFrame] = None
+    
+    def _register_pipeline_steps(self):
+        self.pipeline_steps = [
+            ("detect_swings", self._detect_swings),
+            ("build_sequence", self._build_sequence),
+            ("compute_statistics", self._compute_statistics),
+        ]
+    
+    def get_config_snapshot(self) -> Dict[str, Any]:
+        return {
+            "module_name": self.module_name, "module_version": self.module_version,
+            "swing_strength": SWING_STRENGTH,
+            "min_swing_distance": MIN_SWING_DISTANCE,
+            "confirmation_lag": CONFIRMATION_LAG,
+            "detector": "FractalDetector (atlas.core.pattern_detection)",
+        }
+    
+    def get_protocol_snapshot(self) -> Dict[str, Any]:
+        return {
+            "question": PROTOCOL.question, "hypothesis": PROTOCOL.hypothesis,
+            "methodology": PROTOCOL.methodology, "depends_on": PROTOCOL.depends_on,
+        }
+    
+    # ---- Step 1: Detect Swings ----
+    def _detect_swings(self) -> Dict[str, Any]:
+        """
+        Detect fractal swing highs and swing lows.
+        
+        Uses FractalDetector from atlas.core.pattern_detection.
+        Confirmation requires k bars on each side.
+        """
+        self.logger.info("Step 1: Detecting fractal swings")
+        self.logger.info(f"  Strength (k): {SWING_STRENGTH}")
+        self.logger.info(f"  Confirmation lag: {CONFIRMATION_LAG} bars")
+        self.logger.info(f"  Note: Uses future bars for confirmation (research only)")
+        
+        # Use reusable core detector
+        result = self.detector.detect_all(self.df)
+        
+        self.df['is_swing_high'] = result['is_swing_high']
+        self.df['is_swing_low'] = result['is_swing_low']
+        self.df['swing_type'] = result['swing_type']
+        
+        n_highs = int(self.df['is_swing_high'].sum())
+        n_lows = int(self.df['is_swing_low'].sum())
+        
+        self.logger.metric("Swing highs detected", f"{n_highs:,}")
+        self.logger.metric("Swing lows detected", f"{n_lows:,}")
+        self.logger.metric("Confirmation lag (each side)", f"{CONFIRMATION_LAG} bars")
+        
+        return {
+            "swing_highs": n_highs,
+            "swing_lows": n_lows,
+            "total_swings": n_highs + n_lows,
+            "confirmation_lag": CONFIRMATION_LAG,
+        }
+    
+    # ---- Step 2: Build Sequence ----
+    def _build_sequence(self) -> Dict[str, Any]:
+        """
+        Build chronological swing sequence.
+        
+        Extracts swing points in time order with:
+        - Timestamp, type, price, bar index
+        - Distance from previous swing (%)
+        - Duration from previous swing (bars)
+        """
+        self.logger.info("Step 2: Building swing sequence")
+        
+        # Extract swing points
+        swing_mask = self.df['is_swing_high'] | self.df['is_swing_low']
+        swing_indices = self.df[swing_mask].index
+        
+        if len(swing_indices) == 0:
+            self.logger.warning("No swing points detected")
+            self.swing_points = pd.DataFrame(columns=[
+                'timestamp', 'swing_type', 'price', 'bar_index',
+                'distance_pct', 'duration_bars', 'is_higher_high',
+                'is_lower_low', 'is_higher_low', 'is_lower_high'
+            ])
+            return {"swing_sequence_count": 0}
+        
+        points = []
+        prev_high = None
+        prev_low = None
+        
+        for i, idx in enumerate(swing_indices):
+            row = self.df.loc[idx]
+            swing_type = row['swing_type']
+            
+            if swing_type == 'High':
+                price = row['high']
+            else:
+                price = row['low']
+            
+            point = {
+                'timestamp': row['timestamp'],
+                'swing_type': swing_type,
+                'price': float(price),
+                'bar_index': int(idx) if isinstance(idx, (int, np.integer)) else i,
+            }
+            
+            # Distance from previous swing of same type
+            if swing_type == 'High':
+                if prev_high is not None:
+                    prev_price = prev_high['price']
+                    point['distance_pct'] = round((price - prev_price) / prev_price * 100, 4)
+                    point['duration_bars'] = point['bar_index'] - prev_high['bar_index']
+                    point['is_higher_high'] = price > prev_price
+                    point['is_lower_high'] = price < prev_price
+                else:
+                    point['distance_pct'] = 0.0
+                    point['duration_bars'] = 0
+                    point['is_higher_high'] = False
+                    point['is_lower_high'] = False
+                point['is_lower_low'] = False
+                point['is_higher_low'] = False
+                prev_high = point.copy()
+            else:
+                if prev_low is not None:
+                    prev_price = prev_low['price']
+                    point['distance_pct'] = round((price - prev_price) / prev_price * 100, 4)
+                    point['duration_bars'] = point['bar_index'] - prev_low['bar_index']
+                    point['is_lower_low'] = price < prev_price
+                    point['is_higher_low'] = price > prev_price
+                else:
+                    point['distance_pct'] = 0.0
+                    point['duration_bars'] = 0
+                    point['is_lower_low'] = False
+                    point['is_higher_low'] = False
+                point['is_higher_high'] = False
+                point['is_lower_high'] = False
+                prev_low = point.copy()
+            
+            points.append(point)
+        
+        self.swing_points = pd.DataFrame(points)
+        self.result.artifacts['swing_points'] = self.swing_points.copy()
+        
+        n_points = len(self.swing_points)
+        self.logger.metric("Swing points in sequence", f"{n_points:,}")
+        
+        return {"swing_sequence_count": n_points}
+    
+    # ---- Step 3: Statistics ----
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Compute swing statistics."""
+        self.logger.info("Step 3: Computing swing statistics")
+        
+        if self.swing_points is None or len(self.swing_points) == 0:
+            self.logger.warning("No swing points for statistics")
+            return {"swings_analyzed": 0}
+        
+        sp = self.swing_points
+        
+        highs = sp[sp['swing_type'] == 'High']
+        lows = sp[sp['swing_type'] == 'Low']
+        
+        stats = {
+            "total_swings": len(sp),
+            "swing_highs": len(highs),
+            "swing_lows": len(lows),
+        }
+        
+        # Distance statistics (excluding first of each type)
+        high_dist = highs[highs['distance_pct'] != 0]['distance_pct']
+        low_dist = lows[lows['distance_pct'] != 0]['distance_pct']
+        
+        if len(high_dist) > 0:
+            stats["mean_high_distance_pct"] = round(float(high_dist.mean()), 4)
+            stats["median_high_distance_pct"] = round(float(high_dist.median()), 4)
+            stats["max_high_distance_pct"] = round(float(high_dist.max()), 4)
+        
+        if len(low_dist) > 0:
+            stats["mean_low_distance_pct"] = round(float(low_dist.mean()), 4)
+            stats["median_low_distance_pct"] = round(float(low_dist.median()), 4)
+            stats["max_low_distance_pct"] = round(float(low_dist.max()), 4)
+        
+        # Duration statistics
+        high_dur = highs[highs['duration_bars'] > 0]['duration_bars']
+        low_dur = lows[lows['duration_bars'] > 0]['duration_bars']
+        
+        if len(high_dur) > 0:
+            stats["mean_high_duration"] = round(float(high_dur.mean()), 1)
+            stats["median_high_duration"] = round(float(high_dur.median()), 1)
+        
+        if len(low_dur) > 0:
+            stats["mean_low_duration"] = round(float(low_dur.mean()), 1)
+            stats["median_low_duration"] = round(float(low_dur.median()), 1)
+        
+        # HH/HL/LH/LL counts
+        if len(highs) > 0:
+            stats["hh_count"] = int(highs['is_higher_high'].sum())
+            stats["lh_count"] = int(highs['is_lower_high'].sum())
+        if len(lows) > 0:
+            stats["ll_count"] = int(lows['is_lower_low'].sum())
+            stats["hl_count"] = int(lows['is_higher_low'].sum())
+        
+        for key, value in stats.items():
+            self.result.statistics[key] = value
+        
+        self.logger.info(f"\n  Swing Statistics:")
+        self.logger.info(f"    Total: {stats['total_swings']:,} ({stats['swing_highs']} highs, {stats['swing_lows']} lows)")
+        if 'mean_high_distance_pct' in stats:
+            self.logger.info(f"    Mean high distance: {stats['mean_high_distance_pct']:.4f}%")
+        if 'mean_low_distance_pct' in stats:
+            self.logger.info(f"    Mean low distance: {stats['mean_low_distance_pct']:.4f}%")
+        if 'hh_count' in stats:
+            self.logger.info(f"    HH: {stats.get('hh_count', 0)}, LH: {stats.get('lh_count', 0)}")
+            self.logger.info(f"    HL: {stats.get('hl_count', 0)}, LL: {stats.get('ll_count', 0)}")
+        
+        # Summary artifact
+        summary_data = {"metric": list(stats.keys()), "value": list(stats.values())}
+        self.result.artifacts['swing_summary'] = pd.DataFrame(summary_data)
+        
+        return {"swings_analyzed": len(sp)}
+    
+    def compute(self) -> Dict[str, Any]:
+        self.logger.section("Executing Pipeline (Phase 1.1)")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 012 Phase 1.1 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df: pd.DataFrame, dataset_id: str = "in_memory",
+                      output_dir: Optional[str] = None):
+        return super().run_dataframe(df, dataset_id, output_dir)

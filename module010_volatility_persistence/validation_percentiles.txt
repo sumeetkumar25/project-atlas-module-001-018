@@ -1,0 +1,420 @@
+# atlas/modules/module010_volatility_persistence/validation_percentiles.py
+"""
+Atlas Percentile Validator
+Permanent validation for rolling percentile calculations.
+
+DESIGN DECISION: Full rolling window required.
+  - Percentile window = 252
+  - Volatility warm-up = 20
+  - Percentile warm-up = 251 (window - 1)
+  - Total warm-up NaN = 20 + 251 = 271
+  - Every valid percentile uses exactly 252 observations
+  - Estimates are statistically comparable across all bars
+
+CRITICAL: Future-leakage test ensures percentiles never use future data.
+Tie-handling: rank = count(history <= current), so constant values → 100%.
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Tuple, List
+
+
+def validate_percentile_series(percentiles: pd.Series,
+                                volatility_length: int,
+                                window: int) -> Tuple[bool, List[str]]:
+    """
+    Validate a calculated percentile series.
+    
+    Full rolling window design:
+    - First valid percentile at index (volatility_warmup + window - 1)
+    - Total NaN = volatility_warmup + window - 1
+    - For vol_warmup=20, window=252: total NaN = 271
+    
+    Args:
+        percentiles: Calculated percentile series
+        volatility_length: Number of rows in volatility series
+        window: Percentile rolling window size
+        
+    Returns:
+        (is_valid, list_of_warnings)
+    """
+    warnings = []
+    is_valid = True
+    
+    # Check 1: Numeric dtype
+    if not pd.api.types.is_numeric_dtype(percentiles):
+        return False, ["Percentile series is not numeric dtype"]
+    
+    # Check 2: Length matches volatility series
+    if len(percentiles) != volatility_length:
+        warnings.append(f"Length mismatch: expected {volatility_length}, got {len(percentiles)}")
+        is_valid = False
+    
+    # Check 3: Warm-up NaN count
+    # The caller must provide the expected NaN count based on their pipeline
+    # For full rolling window: vol_warmup + window - 1
+    # Default check: at minimum window-1 NaN after volatility warm-up
+    expected_min_nan = window - 1
+    actual_nan = int(percentiles.isna().sum())
+    
+    if actual_nan < expected_min_nan:
+        warnings.append(f"Too few NaN: expected at least {expected_min_nan}, got {actual_nan}")
+        is_valid = False
+    
+    # Check 4: All non-NaN values in [0, 100]
+    valid = percentiles.dropna()
+    if len(valid) > 0:
+        if (valid < 0).any():
+            warnings.append(f"Found {int((valid < 0).sum())} negative values")
+            is_valid = False
+        if (valid > 100).any():
+            warnings.append(f"Found {int((valid > 100).sum())} values > 100")
+            is_valid = False
+    
+    # Check 5: No infinities
+    if np.isinf(percentiles).any():
+        warnings.append("Found infinite values")
+        is_valid = False
+    
+    # Check 6: Valid values are finite
+    if len(valid) > 0 and not np.isfinite(valid).all():
+        warnings.append("Non-finite values found")
+        is_valid = False
+    
+    return is_valid, warnings
+
+
+def compute_rolling_percentile(volatility: pd.Series, window: int = 252) -> pd.Series:
+    """
+    Compute rolling historical percentile of volatility.
+    
+    DESIGN: Full rolling window required.
+    - Uses exactly `window` observations when available
+    - When history < window, returns NaN (waits for full window)
+    - Never uses future data (history only up to current bar)
+    
+    Tie-handling: rank = count(history <= current)
+    - Constant volatility series → all values = 100%
+    
+    Args:
+        volatility: Series of rolling volatility (may contain NaN at start)
+        window: Lookback window for percentile calculation
+        
+    Returns:
+        Series of percentile ranks (0-100), same length as input
+    """
+    if window < 2:
+        raise ValueError(f"Window must be >= 2, got {window}")
+    
+    result = pd.Series(np.nan, index=volatility.index, dtype=float)
+    
+    for i in range(len(volatility)):
+        current_val = volatility.iloc[i]
+        
+        # Skip NaN volatility values
+        if pd.isna(current_val):
+            continue
+        
+        # Get history up to current bar (NEVER future)
+        start_idx = max(0, i - window + 1)
+        history = volatility.iloc[start_idx:i+1]
+        
+        # Require full window of non-NaN values
+        valid_history = history.dropna()
+        if len(valid_history) < window:
+            continue
+        
+        # Percentile rank: fraction of values <= current
+        rank = (valid_history <= current_val).sum()
+        percentile = (rank / len(valid_history)) * 100
+        
+        result.iloc[i] = percentile
+    
+    return result
+
+
+def test_future_leakage(volatility: pd.Series, window: int = 252) -> bool:
+    """
+    CRITICAL: Verify that modifying future bars does not change earlier percentiles.
+    
+    1. Compute percentiles on original data
+    2. Modify the last 100 bars
+    3. Recompute percentiles
+    4. Verify earlier percentiles are identical
+    """
+    original = compute_rolling_percentile(volatility, window)
+    
+    modified_vol = volatility.copy()
+    if len(modified_vol) > 100:
+        modified_vol.iloc[-100:] = modified_vol.iloc[-100:] * 10
+    
+    modified = compute_rolling_percentile(modified_vol, window)
+    
+    # Check all bars except the last 100
+    check_end = len(volatility) - 100
+    if check_end > window:
+        orig_slice = original.iloc[window:check_end].dropna()
+        mod_slice = modified.iloc[window:check_end].dropna()
+        
+        if len(orig_slice) > 0 and len(mod_slice) > 0:
+            if not np.allclose(orig_slice.values, mod_slice.values, atol=1e-10):
+                return False
+    
+    return True
+
+
+# ============================================================
+# Unit Tests (Updated for full rolling window design)
+# ============================================================
+
+def test_full_window_required():
+    """
+    Test A: Percentile requires full window of valid volatility.
+    
+    With vol_warmup=20, window=252:
+    - First valid percentile at index 271 (20 + 251)
+    - Total warm-up NaN = 271
+    """
+    np.random.seed(42)
+    n = 600
+    vol_warmup = 20
+    pct_window = 252
+    
+    # Volatility with warm-up NaN
+    volatility = pd.Series(
+        [np.nan] * vol_warmup + 
+        list(np.abs(np.random.normal(0.02, 0.01, n - vol_warmup)))
+    )
+    
+    percentiles = compute_rolling_percentile(volatility, pct_window)
+    
+    # Expected total NaN = vol_warmup + pct_window - 1
+    expected_nan = vol_warmup + pct_window - 1
+    actual_nan = int(percentiles.isna().sum())
+    
+    assert actual_nan == expected_nan, \
+        f"Expected {expected_nan} NaN (vol_warmup={vol_warmup} + window-1={pct_window-1}), got {actual_nan}"
+    
+    # First valid at index expected_nan
+    assert not pd.isna(percentiles.iloc[expected_nan]), \
+        f"First valid should be at index {expected_nan}"
+    
+    # Value before that is NaN
+    assert pd.isna(percentiles.iloc[expected_nan - 1]), \
+        f"Index {expected_nan - 1} should be NaN"
+    
+    return True
+
+
+def test_increasing_volatility_saturates():
+    """
+    Test B: Strictly increasing volatility → percentile saturates near 100%.
+    
+    With a full rolling window and strictly increasing values,
+    the current value is always the largest in its window,
+    so percentile quickly reaches 100%.
+    """
+    n = 600
+    vol_warmup = 20
+    pct_window = 100
+    
+    # Strictly increasing volatility
+    volatility = pd.Series(
+        [np.nan] * vol_warmup + 
+        list(np.linspace(0.01, 0.10, n - vol_warmup))
+    )
+    
+    percentiles = compute_rolling_percentile(volatility, pct_window)
+    valid = percentiles.dropna()
+    
+    # After window is full, all values should be 100%
+    mid_point = len(valid) // 2
+    later_values = valid.iloc[mid_point:]
+    
+    assert (later_values > 90).all(), \
+        f"Later values should be near 100%, got range [{later_values.min():.1f}, {later_values.max():.1f}]"
+    
+    return True
+
+
+def test_constant_volatility_gives_100():
+    """
+    Test C: Constant volatility → all percentiles = 100%.
+    
+    This is correct behavior for the chosen tie-handling rule:
+    rank = count(history <= current)
+    For identical values, every observation is <= every other,
+    so rank = window size, percentile = 100%.
+    """
+    n = 500
+    vol_warmup = 20
+    pct_window = 100
+    
+    volatility = pd.Series(
+        [np.nan] * vol_warmup + [0.02] * (n - vol_warmup)
+    )
+    
+    percentiles = compute_rolling_percentile(volatility, pct_window)
+    valid = percentiles.dropna()
+    
+    # All valid percentiles should be 100%
+    assert np.allclose(valid.values, 100.0, atol=1e-10), \
+        f"Constant vol should give 100%, got mean={valid.mean():.1f}"
+    
+    return True
+
+
+def test_range_0_to_100():
+    """
+    Test D: All percentile values in [0, 100].
+    """
+    np.random.seed(42)
+    n = 800
+    vol_warmup = 20
+    pct_window = 100
+    
+    volatility = pd.Series(
+        [np.nan] * vol_warmup + 
+        list(np.abs(np.random.normal(0.02, 0.01, n - vol_warmup)))
+    )
+    
+    percentiles = compute_rolling_percentile(volatility, pct_window)
+    valid = percentiles.dropna()
+    
+    assert valid.min() >= 0, f"Min below 0: {valid.min():.2f}"
+    assert valid.max() <= 100, f"Max above 100: {valid.max():.2f}"
+    
+    return True
+
+
+def test_warmup_nan_count():
+    """
+    Test E: Warm-up NaN count = vol_warmup + window - 1.
+    """
+    np.random.seed(42)
+    
+    for vol_warmup, pct_window in [(10, 50), (20, 100), (20, 252)]:
+        n = pct_window * 3
+        volatility = pd.Series(
+            [np.nan] * vol_warmup + 
+            list(np.abs(np.random.normal(0.02, 0.01, n - vol_warmup)))
+        )
+        
+        percentiles = compute_rolling_percentile(volatility, pct_window)
+        
+        expected_nan = vol_warmup + pct_window - 1
+        actual_nan = int(percentiles.isna().sum())
+        
+        assert actual_nan == expected_nan, \
+            f"vw={vol_warmup}, pw={pct_window}: expected {expected_nan}, got {actual_nan}"
+    
+    return True
+
+
+def test_reference_implementation():
+    """
+    Test F: Compare with independent rolling window implementation.
+    
+    Uses the SAME rolling window logic implemented differently
+    (vectorized where possible, but same algorithm).
+    """
+    np.random.seed(42)
+    n = 500
+    vol_warmup = 20
+    pct_window = 100
+    
+    volatility = pd.Series(
+        [np.nan] * vol_warmup + 
+        list(np.abs(np.random.normal(0.02, 0.01, n - vol_warmup)))
+    )
+    
+    atlas = compute_rolling_percentile(volatility, pct_window)
+    
+    # Independent reference: same rolling window, same ranking rule
+    ref = pd.Series(np.nan, index=volatility.index, dtype=float)
+    valid_vol = volatility.dropna()
+    
+    for i in volatility.index:
+        if pd.isna(volatility.iloc[i]):
+            continue
+        start = max(0, i - pct_window + 1)
+        window_data = volatility.iloc[start:i+1].dropna()
+        if len(window_data) >= pct_window:
+            rank = (window_data <= volatility.iloc[i]).sum()
+            ref.iloc[i] = (rank / len(window_data)) * 100
+    
+    # Compare all values
+    mask = atlas.notna() & ref.notna()
+    assert mask.sum() > 0, "No overlapping valid values"
+    
+    max_diff = np.abs(atlas[mask] - ref[mask]).max()
+    assert max_diff < 1e-10, f"Reference mismatch: max diff = {max_diff:.2e}"
+    
+    return True
+
+
+def test_no_future_leakage():
+    """
+    Test G: CRITICAL - Future bars must not affect earlier percentiles.
+    """
+    np.random.seed(42)
+    n = 800
+    vol_warmup = 20
+    pct_window = 100
+    
+    volatility = pd.Series(
+        [np.nan] * vol_warmup + 
+        list(np.abs(np.random.normal(0.02, 0.01, n - vol_warmup)))
+    )
+    
+    result = test_future_leakage(volatility, pct_window)
+    assert result, "FUTURE LEAKAGE DETECTED - earlier percentiles changed when future bars modified"
+    
+    return True
+
+
+def run_all_validation_tests():
+    """Run all percentile validation tests"""
+    print("\n" + "=" * 60)
+    print("ATLAS PERCENTILE VALIDATOR - UNIT TESTS")
+    print("=" * 60)
+    print("  Design: Full rolling window required")
+    print("  Tie-handling: rank = count(history <= current)")
+    
+    tests = [
+        ("Full Window Required (271 NaN)", test_full_window_required),
+        ("Increasing Vol Saturates @ 100%", test_increasing_volatility_saturates),
+        ("Constant Vol → 100%", test_constant_volatility_gives_100),
+        ("Range [0, 100]", test_range_0_to_100),
+        ("Warm-up = vol_warmup + window - 1", test_warmup_nan_count),
+        ("Reference Implementation", test_reference_implementation),
+        ("NO FUTURE LEAKAGE", test_no_future_leakage),
+    ]
+    
+    results = {}
+    for name, test_func in tests:
+        try:
+            test_func()
+            results[name] = True
+            print(f"  ✓ {name}")
+        except AssertionError as e:
+            results[name] = False
+            print(f"  ✗ {name}: {e}")
+        except Exception as e:
+            results[name] = False
+            print(f"  ✗ {name}: {type(e).__name__}: {e}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    print("=" * 60)
+    
+    return passed == total
+
+
+if __name__ == "__main__":
+    success = run_all_validation_tests()
+    import sys
+    sys.exit(0 if success else 1)

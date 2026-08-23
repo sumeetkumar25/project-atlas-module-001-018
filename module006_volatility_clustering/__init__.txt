@@ -1,0 +1,5 @@
+# atlas/modules/module006_volatility_clustering/__init__.py
+"""
+Module 006: Volatility Clustering Analysis
+Measures volatility and tests for clustering behavior.
+"""

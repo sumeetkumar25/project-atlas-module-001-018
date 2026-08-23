@@ -1,0 +1,82 @@
+# atlas/modules/module011_breakout_statistics/protocol.py
+"""
+Module 011 Research Protocol
+Breakout Statistics
+
+Science only. No code.
+"""
+
+from atlas.framework.protocol import ResearchProtocol, ModuleCategory
+from .config import MODULE_VERSION
+
+PROTOCOL = ResearchProtocol(
+    module_id="011",
+    module_name="Breakout Statistics",
+    category=ModuleCategory.REGIME,
+    
+    question=(
+        "When BTC breaks above or below a recent trading range, "
+        "what statistically happens afterward?"
+    ),
+    
+    hypothesis=(
+        "Breakout behavior is not random. Breakout outcomes depend on "
+        "volatility regime, prior range compression, and breakout strength. "
+        "We test competing hypotheses objectively without assuming "
+        "breakouts work or fail."
+    ),
+    
+    rationale=(
+        "Breakout trading is one of the oldest strategies in financial markets. "
+        "However, most retail approaches rely on subjective chart patterns. "
+        "Module 011 measures objective breakout behavior using only price data "
+        "and Module 010 volatility states. No indicators, no SMC, no ICT."
+    ),
+    
+    methodology=(
+        "Phase 1: Breakout Detection\n"
+        "1. Load OHLCV data\n"
+        "2. Compute rolling highest high and lowest low (excluding current bar)\n"
+        "3. Detect breakouts: close > previous N-bar high (up) or < previous N-bar low (down)\n"
+        "4. Measure post-breakout behavior: MFE, MAE, bars to peak, bars to failure\n"
+        "5. Export breakout events and summary statistics\n\n"
+        "Phase 2: Regime-Conditional Analysis (future)\n"
+        "- Cross-reference with Module 010 volatility states\n"
+        "- Measure breakout behavior by volatility regime"
+    ),
+    
+    statistics=[
+        "Breakout count (up/down)",
+        "Mean/median MFE after breakout",
+        "Mean/median MAE after breakout",
+        "Failure rate (price returns inside range)",
+        "Bars to peak distribution",
+        "Bars to failure distribution",
+    ],
+    
+    depends_on=["000", "010"],
+    required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+    
+    author="Project Atlas",
+    version=MODULE_VERSION,
+    
+    produces=[
+        "breakout_events",
+        "breakout_summary",
+        "breakout_diagnostics",
+    ],
+    
+    limitations=[
+        "Lookback window is fixed (not adaptive)",
+        "Breakout definition uses close price only",
+        "Does not account for false breakouts within same bar",
+        "Post-breakout measurement window is fixed (100 bars)",
+    ],
+    
+    future_research=[
+        "Volatility regime-conditional breakout analysis",
+        "Adaptive lookback based on ATR",
+        "Breakout strength quantification",
+        "Multi-timeframe breakout confirmation",
+    ]
+)

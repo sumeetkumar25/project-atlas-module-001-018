@@ -1,0 +1,158 @@
+# atlas/modules/module015_compression/test_module.py
+"""
+Module 015 Phase 1 Test Runner
+"""
+
+import sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+from atlas.modules.module015_compression.module import CompressionResearch
+from atlas.core.compression.compression_validation import run_all_validation_tests
+from atlas.runner import ModuleRunner
+from atlas.framework.registry import AtlasRegistry
+from atlas.framework.framework_check import FrameworkChecker
+
+
+def test_core_validator():
+    """Run core compression validator."""
+    print("\n" + "=" * 60)
+    print("TEST: Core Compression Validator (10 tests)")
+    print("=" * 60)
+    return run_all_validation_tests()
+
+
+def test_pipeline_synthetic():
+    """Test pipeline on synthetic data."""
+    print("\n" + "=" * 60)
+    print("TEST: Pipeline (Synthetic)")
+    print("=" * 60)
+    
+    n = 500
+    np.random.seed(42)
+    close = np.cumsum(np.random.normal(0, 5, n)) + 50000
+    close = np.maximum(close, 1)
+    
+    dates = pd.date_range(start="2020-01-01", periods=n, freq="15min")
+    df = pd.DataFrame({
+        "timestamp": dates,
+        "open": close * 0.999,
+        "high": close + np.random.uniform(10, 50, n),
+        "low": close - np.random.uniform(10, 50, n),
+        "close": close,
+        "volume": np.ones(n) * 100
+    })
+    
+    research = CompressionResearch()
+    result = research.run_dataframe(df, dataset_id="synthetic_test")
+    
+    checks = 0
+    if result.status == "completed": checks += 1
+    if result.statistics.get("compression_segments", 0) > 0: checks += 1
+    if result.statistics.get("compression_bars", 0) > 0: checks += 1
+    if 'compression_state' in result.artifacts: checks += 1
+    if 'compression_segments' in result.artifacts: checks += 1
+    if 'post_compression_moves' in result.artifacts: checks += 1
+    
+    labels = ["Completed", "Segments > 0", "Compression > 0", 
+              "State CSV", "Segments CSV", "Post-moves CSV"]
+    for i, label in enumerate(labels):
+        print(f"  {'✓' if i < checks else '✗'} {label}")
+    
+    print(f"\n  Pipeline: {checks}/{len(labels)} passed")
+    return checks >= len(labels) - 1
+
+
+def test_btc_data():
+    """Test on BTC data."""
+    print("\n" + "=" * 60)
+    print("TEST: BTC Data (All Timeframes)")
+    print("=" * 60)
+    
+    datasets = {
+        "BTC_15m": "data/raw/BTCUSD_15m.csv",
+        "BTC_1h": "data/raw/BTCUSD_1h.csv",
+        "BTC_4h": "data/raw/BTCUSD_4h.csv",
+    }
+    
+    missing = [name for name, path in datasets.items() if not Path(path).exists()]
+    if missing:
+        print(f"  ⚠ Missing: {missing}")
+        return True
+    
+    registry = AtlasRegistry()
+    runner = ModuleRunner(registry=registry)
+    
+    results = runner.run_on_datasets(
+        module_class=CompressionResearch,
+        datasets=datasets,
+        output_base_dir="outputs/module015",
+        validate_after=False
+    )
+    
+    all_ok = True
+    for name, result in results.items():
+        if result.status == "completed":
+            comp_pct = result.statistics.get("compression_pct", 0)
+            n_seg = result.statistics.get("compression_segments", 0)
+            mean_dur = result.statistics.get("mean_duration", 0)
+            max_dur = result.statistics.get("max_duration", 0)
+            
+            print(f"\n  {name}:")
+            print(f"    Compression: {comp_pct}% of bars")
+            print(f"    Segments: {n_seg:,}")
+            print(f"    Mean duration: {mean_dur:.1f} bars")
+            print(f"    Max duration: {max_dur} bars")
+        else:
+            print(f"  ✗ {name}: Failed")
+            all_ok = False
+    
+    return all_ok
+
+
+def main():
+    """Test Module 015 Phase 1"""
+    
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 015 PHASE 1 TEST")
+    print("Compression Analysis")
+    print("=" * 70)
+    print("  Compression: range_percentile < 25")
+    print("  Core: atlas.core.compression (reuses atlas.core.volatility)")
+    
+    print("\n[1/4] Core compression validator...")
+    t1 = test_core_validator()
+    
+    print("\n[2/4] Pipeline (synthetic)...")
+    t2 = test_pipeline_synthetic()
+    
+    print("\n[3/4] Framework health check...")
+    checker = FrameworkChecker()
+    checker.run_all_checks()
+    
+    print("\n[4/4] BTC data (all timeframes)...")
+    t3 = test_btc_data()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    results = {"Validator": t1, "Pipeline": t2, "BTC": t3}
+    for name, result in results.items():
+        print(f"  {'✓' if result else '✗'} {name}")
+    
+    passed = sum(results.values())
+    
+    if passed == 3:
+        print(f"\n✓ Module 015 Phase 1 VALIDATED")
+        return 0
+    else:
+        print(f"\n⚠ {3 - passed} test(s) failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

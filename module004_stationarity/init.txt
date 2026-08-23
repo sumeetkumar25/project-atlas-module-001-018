@@ -1,0 +1,5 @@
+# atlas/modules/module004_stationarity/__init__.py
+"""
+Module 004: Stationarity Analysis
+Tests whether BTC returns are statistically stationary.
+"""

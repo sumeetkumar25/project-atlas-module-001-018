@@ -1,0 +1,5 @@
+# atlas/modules/module012_swing_structure/__init__.py
+"""
+Module 012: Swing Structure Analysis
+Measures natural price geometry through fractal swing detection.
+"""

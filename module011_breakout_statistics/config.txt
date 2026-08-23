@@ -1,0 +1,36 @@
+# atlas/modules/module011_breakout_statistics/config.py
+"""
+Module 011 Configuration
+Breakout Statistics
+
+All parameters live here. Never hard-coded in module.py.
+"""
+
+MODULE_ID = "011"
+MODULE_NAME = "Breakout Statistics"
+MODULE_VERSION = "0.1.0-phase1"
+
+# Breakout detection
+BREAKOUT_LOOKBACK = 20          # Bars to look back for range
+BREAKOUT_CONFIRMATION = "close" # Price column used for breakout detection
+MIN_BREAKOUT_SIZE = 0           # Minimum breakout size (0 = any breach)
+
+# Post-breakout measurement
+LOOKAHEAD_BARS = 100            # Bars to track after breakout
+
+# Measurement columns
+BREAKOUT_EVENT_COLUMNS = [
+    "breakout_id",
+    "timestamp",
+    "direction",
+    "lookback",
+    "breakout_price",
+    "previous_range_high",
+    "previous_range_low",
+    "range_width_pct",
+    "subsequent_mfe_pct",
+    "subsequent_mae_pct",
+    "bars_to_peak",
+    "bars_to_failure",
+    "failed",
+]

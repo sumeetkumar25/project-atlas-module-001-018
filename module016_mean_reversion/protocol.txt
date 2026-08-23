@@ -1,0 +1,78 @@
+# atlas/modules/module016_mean_reversion/protocol.py
+"""
+Module 016 Research Protocol
+Mean Reversion Analysis
+
+Science only. No code.
+"""
+
+from atlas.framework.protocol import ResearchProtocol, ModuleCategory
+from .config import MODULE_VERSION
+
+PROTOCOL = ResearchProtocol(
+    module_id="016",
+    module_name="Mean Reversion",
+    category=ModuleCategory.PRICE_BEHAVIOR,
+    
+    question=(
+        "How frequently does BTC revert "
+        "after statistically significant deviations?"
+    ),
+    
+    hypothesis=(
+        "Large deviations from equilibrium "
+        "have higher probability of reverting."
+    ),
+    
+    rationale=(
+        "Mean reversion is one of the most fundamental market behaviors. "
+        "Understanding when and how strongly BTC reverts after extreme moves "
+        "is essential for timing entries, setting profit targets, and "
+        "distinguishing trending from ranging environments."
+    ),
+    
+    methodology=(
+        "Phase 1.0: Skeleton architecture (current)\n"
+        "Phase 1.1: Deviation calculation from rolling equilibrium\n"
+        "Phase 1.2: Extreme detection using z-score thresholds\n"
+        "Phase 1.3: Reversion detection and measurement\n"
+        "Phase 1.4: Duration and magnitude statistics\n"
+        "Phase 1.5: Summary and export"
+    ),
+    
+    statistics=[
+        "Deviation from equilibrium (z-score)",
+        "Extreme event frequency",
+        "Reversion probability",
+        "Time to reversion (mean, median, max)",
+        "Reversion magnitude (mean, median, max)",
+        "Failure rate (no reversion within window)",
+    ],
+    
+    depends_on=["010", "013", "015"],
+    required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+    
+    author="Project Atlas",
+    version=MODULE_VERSION,
+    
+    produces=[
+        "deviation_series",
+        "extreme_events",
+        "reversion_events",
+        "reversion_statistics",
+    ],
+    
+    limitations=[
+        "Equilibrium is defined by simple rolling mean",
+        "Z-score threshold is fixed at 2.0",
+        "Maximum reversion window is fixed at 50 bars",
+        "Does not account for volatility regime",
+    ],
+    
+    future_research=[
+        "Volatility-regime conditional reversion",
+        "Adaptive equilibrium windows",
+        "Multi-timeframe reversion alignment",
+        "Reversion-conditional entry strategies",
+    ]
+)

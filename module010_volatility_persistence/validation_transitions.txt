@@ -1,0 +1,382 @@
+# atlas/modules/module010_volatility_persistence/validation_transitions.py
+"""
+Atlas Transition Matrix Validator
+Permanent validation for volatility regime transition analysis.
+
+Validates:
+- Adjacent-segment transition counting
+- Row-normalized probability matrix
+- Coverage: N_segments - 1 transitions
+- Row sums = 1.0
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Tuple, List
+
+
+def validate_transition_matrix(counts: pd.DataFrame,
+                                probabilities: pd.DataFrame,
+                                segments: pd.DataFrame,
+                                labels: List[str],
+                                transition_count: int) -> Tuple[bool, List[str]]:
+    """
+    Validate transition count and probability matrices.
+    
+    Checks:
+    - All expected states present as rows and columns
+    - Count sum = transition_count
+    - Probability rows sum to 1.0
+    - No negative values
+    - Dimensions are (n_labels, n_labels)
+    
+    Args:
+        counts: Transition count matrix
+        probabilities: Transition probability matrix
+        segments: Source segment DataFrame
+        labels: Expected state labels
+        transition_count: Expected number of transitions (N_segments - 1)
+        
+    Returns:
+        (is_valid, list_of_warnings)
+    """
+    warnings = []
+    is_valid = True
+    
+    n_labels = len(labels)
+    
+    # Check 1: Dimensions
+    if counts.shape != (n_labels, n_labels):
+        warnings.append(f"Count matrix shape {counts.shape} != ({n_labels}, {n_labels})")
+        is_valid = False
+    if probabilities.shape != (n_labels, n_labels):
+        warnings.append(f"Probability matrix shape {probabilities.shape} != ({n_labels}, {n_labels})")
+        is_valid = False
+    
+    # Check 2: All states present
+    for state in labels:
+        if state not in counts.index:
+            warnings.append(f"Missing row state: {state}")
+            is_valid = False
+        if state not in counts.columns:
+            warnings.append(f"Missing column state: {state}")
+            is_valid = False
+    
+    # Check 3: Count sum equals expected transitions
+    total_count = int(counts.values.sum())
+    expected = max(0, len(segments) - 1)
+    if total_count != expected:
+        warnings.append(f"Count sum mismatch: {total_count} != {expected} (N_segments-1)")
+        is_valid = False
+    
+    # Check 4: Probability rows sum to 1.0 (for rows with data)
+    row_sums = probabilities.sum(axis=1)
+    for state in labels:
+        if state in row_sums.index:
+            row_total = row_sums[state]
+            # Row with transitions must sum to 1
+            if counts.loc[state].sum() > 0:
+                if not np.isclose(row_total, 1.0, atol=1e-10):
+                    warnings.append(f"Row '{state}' sums to {row_total:.6f} != 1.0")
+                    is_valid = False
+    
+    # Check 5: No negative values
+    if (counts.values < 0).any():
+        warnings.append("Negative values in count matrix")
+        is_valid = False
+    if (probabilities.values < 0).any():
+        warnings.append("Negative values in probability matrix")
+        is_valid = False
+    
+    # Check 6: Probabilities in [0, 1]
+    if len(probabilities.dropna().values) > 0:
+        valid_probs = probabilities.dropna().values.flatten()
+        valid_probs = valid_probs[~np.isnan(valid_probs)]
+        if len(valid_probs) > 0:
+            if (valid_probs < 0).any() or (valid_probs > 1).any():
+                warnings.append("Probabilities outside [0, 1]")
+                is_valid = False
+    
+    return is_valid, warnings
+
+
+def compute_transition_matrix(segments: pd.DataFrame,
+                               labels: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Compute transition count and probability matrices from segments.
+    
+    Uses adjacent segments: each consecutive pair (seg_i, seg_{i+1})
+    defines one transition from seg_i.state to seg_{i+1}.state.
+    
+    Args:
+        segments: Segment DataFrame with 'state' column
+        labels: All expected state labels
+        
+    Returns:
+        (counts_df, probabilities_df, transitions_df)
+        - counts_df: (n_labels × n_labels) transition counts
+        - probabilities_df: Row-normalized probabilities
+        - transitions_df: Individual transitions with from_state, to_state
+    """
+    n_labels = len(labels)
+    
+    # Initialize matrices
+    counts = pd.DataFrame(0, index=labels, columns=labels, dtype=int)
+    
+    transitions = []
+    
+    if len(segments) >= 2:
+        for i in range(len(segments) - 1):
+            from_state = segments.iloc[i]['state']
+            to_state = segments.iloc[i + 1]['state']
+            
+            counts.loc[from_state, to_state] += 1
+            
+            transitions.append({
+                'from_state': from_state,
+                'to_state': to_state,
+                'from_segment': int(segments.iloc[i]['segment_id']),
+                'to_segment': int(segments.iloc[i + 1]['segment_id']),
+            })
+    
+    # Convert to probabilities
+    probabilities = pd.DataFrame(0.0, index=labels, columns=labels, dtype=float)
+    
+    for state in labels:
+        row_sum = counts.loc[state].sum()
+        if row_sum > 0:
+            probabilities.loc[state] = counts.loc[state] / row_sum
+        else:
+            probabilities.loc[state] = np.nan
+    
+    return counts, probabilities, pd.DataFrame(transitions)
+
+
+# ============================================================
+# Unit Tests
+# ============================================================
+
+def test_known_sequence():
+    """
+    Test A: Known segment sequence produces correct transitions.
+    
+    Low→Low, Low→Normal, Normal→High → 3 transitions
+    """
+    segments = pd.DataFrame({
+        'segment_id': [0, 1, 2, 3],
+        'state': ['Low', 'Low', 'Normal', 'High']
+    })
+    labels = ["Low", "Normal", "High", "Extreme"]
+    
+    counts, probs, trans = compute_transition_matrix(segments, labels)
+    
+    assert len(trans) == 3, f"Expected 3 transitions, got {len(trans)}"
+    assert counts.loc['Low', 'Low'] == 1
+    assert counts.loc['Low', 'Normal'] == 1
+    assert counts.loc['Normal', 'High'] == 1
+    assert counts.values.sum() == 3
+    
+    return True
+
+
+def test_single_segment():
+    """
+    Test B: Single segment → 0 transitions.
+    """
+    segments = pd.DataFrame({
+        'segment_id': [0],
+        'state': ['Low']
+    })
+    labels = ["Low", "Normal", "High", "Extreme"]
+    
+    counts, probs, trans = compute_transition_matrix(segments, labels)
+    
+    assert len(trans) == 0, f"Expected 0 transitions, got {len(trans)}"
+    assert counts.values.sum() == 0
+    
+    return True
+
+
+def test_alternating():
+    """
+    Test C: Alternating states → correct transition count.
+    
+    Low, High, Low, High → 3 transitions: L→H, H→L, L→H
+    """
+    segments = pd.DataFrame({
+        'segment_id': [0, 1, 2, 3],
+        'state': ['Low', 'High', 'Low', 'High']
+    })
+    labels = ["Low", "Normal", "High", "Extreme"]
+    
+    counts, probs, trans = compute_transition_matrix(segments, labels)
+    
+    assert len(trans) == 3, f"Expected 3 transitions, got {len(trans)}"
+    assert counts.loc['Low', 'High'] == 2
+    assert counts.loc['High', 'Low'] == 1
+    assert counts.values.sum() == 3
+    
+    return True
+
+
+def test_coverage():
+    """
+    Test D: Transition count = N_segments - 1.
+    """
+    np.random.seed(42)
+    labels = ["Low", "Normal", "High", "Extreme"]
+    n = 200
+    
+    segments = pd.DataFrame({
+        'segment_id': range(n),
+        'state': [np.random.choice(labels) for _ in range(n)]
+    })
+    
+    counts, probs, trans = compute_transition_matrix(segments, labels)
+    
+    assert len(trans) == n - 1, f"Expected {n-1} transitions, got {len(trans)}"
+    assert counts.values.sum() == n - 1
+    
+    return True
+
+
+def test_row_sums():
+    """
+    Test E: Each probability row sums to 1.0.
+    """
+    np.random.seed(42)
+    labels = ["Low", "Normal", "High", "Extreme"]
+    n = 200
+    
+    segments = pd.DataFrame({
+        'segment_id': range(n),
+        'state': [np.random.choice(labels) for _ in range(n)]
+    })
+    
+    counts, probs, trans = compute_transition_matrix(segments, labels)
+    
+    for state in labels:
+        row_sum = counts.loc[state].sum()
+        if row_sum > 0:
+            prob_sum = probs.loc[state].sum()
+            assert np.isclose(prob_sum, 1.0, atol=1e-10), \
+                f"Row '{state}' probability sum = {prob_sum:.6f}"
+    
+    return True
+
+
+def test_reference_implementation():
+    """
+    Test F: Compare with pandas crosstab.
+    """
+    np.random.seed(42)
+    labels = ["Low", "Normal", "High", "Extreme"]
+    n = 200
+    
+    segments = pd.DataFrame({
+        'segment_id': range(n),
+        'state': [np.random.choice(labels) for _ in range(n)]
+    })
+    
+    counts, probs, trans = compute_transition_matrix(segments, labels)
+    
+    # Reference: build from_state and to_state arrays
+    from_states = segments['state'].iloc[:-1].values
+    to_states = segments['state'].iloc[1:].values
+    
+    ref_counts = pd.crosstab(
+        pd.Series(from_states, name='from'),
+        pd.Series(to_states, name='to')
+    )
+    
+    # Ensure all states present
+    for state in labels:
+        if state not in ref_counts.index:
+            ref_counts.loc[state] = 0
+        if state not in ref_counts.columns:
+            ref_counts[state] = 0
+    
+    ref_counts = ref_counts.loc[labels, labels].fillna(0).astype(int)
+    
+    # Compare
+    for from_s in labels:
+        for to_s in labels:
+            assert counts.loc[from_s, to_s] == ref_counts.loc[from_s, to_s], \
+                f"{from_s}→{to_s}: atlas={counts.loc[from_s, to_s]}, ref={ref_counts.loc[from_s, to_s]}"
+    
+    return True
+
+
+def test_no_illegal_states():
+    """
+    Test G: All states in allowed labels.
+    """
+    np.random.seed(42)
+    labels = ["Low", "Normal", "High", "Extreme"]
+    n = 200
+    
+    segments = pd.DataFrame({
+        'segment_id': range(n),
+        'state': [np.random.choice(labels) for _ in range(n)]
+    })
+    
+    counts, probs, trans = compute_transition_matrix(segments, labels)
+    
+    for state in counts.index:
+        assert state in labels, f"Illegal state in rows: {state}"
+    for state in counts.columns:
+        assert state in labels, f"Illegal state in columns: {state}"
+    
+    if len(trans) > 0:
+        for state in trans['from_state'].unique():
+            assert state in labels, f"Illegal from_state: {state}"
+        for state in trans['to_state'].unique():
+            assert state in labels, f"Illegal to_state: {state}"
+    
+    return True
+
+
+def run_all_validation_tests():
+    """Run all transition matrix validation tests"""
+    print("\n" + "=" * 60)
+    print("ATLAS TRANSITION MATRIX VALIDATOR - UNIT TESTS")
+    print("=" * 60)
+    print("  Method: Adjacent-segment transitions")
+    print("  Coverage: N_segments - 1 transitions")
+    
+    tests = [
+        ("Known Sequence (3 transitions)", test_known_sequence),
+        ("Single Segment (0 transitions)", test_single_segment),
+        ("Alternating States", test_alternating),
+        ("Coverage = N-1", test_coverage),
+        ("Row Sums = 1.0", test_row_sums),
+        ("Reference vs crosstab", test_reference_implementation),
+        ("No Illegal States", test_no_illegal_states),
+    ]
+    
+    results = {}
+    for name, test_func in tests:
+        try:
+            test_func()
+            results[name] = True
+            print(f"  ✓ {name}")
+        except AssertionError as e:
+            results[name] = False
+            print(f"  ✗ {name}: {e}")
+        except Exception as e:
+            results[name] = False
+            print(f"  ✗ {name}: {type(e).__name__}: {e}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    print("=" * 60)
+    
+    return passed == total
+
+
+if __name__ == "__main__":
+    success = run_all_validation_tests()
+    import sys
+    sys.exit(0 if success else 1)

@@ -1,0 +1,204 @@
+# atlas/modules/module002_volatility_persistence/test_module.py
+"""
+Module 002 Phase 4 Test Runner
+Validates all phases including duration analysis.
+
+FIXED: Validation 4 uses mathematically correct bounds (min ≤ median ≤ max, min ≤ mean ≤ max).
+"""
+
+import sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+from atlas.modules.module002_volatility_persistence.module import (
+    VolatilityPersistenceResearch,
+    VOLATILITY_WINDOWS,
+    PRIMARY_WINDOW,
+    REGIME_LABELS
+)
+from atlas.runner import ModuleRunner
+from atlas.framework.registry import AtlasRegistry
+from atlas.framework.framework_check import FrameworkChecker
+
+
+def test_phase4_outputs(result, vol_df, dataset_name: str) -> bool:
+    """Validate Phase 4: Duration analysis"""
+    print(f"\n  Phase 4 Validation for {dataset_name}:")
+    
+    checks_passed = 0
+    checks_failed = 0
+    
+    # Check artifacts
+    if 'duration_runs' not in result.artifacts:
+        print(f"    ✗ Missing duration_runs")
+        checks_failed += 1
+    if 'duration_summary' not in result.artifacts:
+        print(f"    ✗ Missing duration_summary")
+        checks_failed += 1
+    
+    if checks_failed > 0:
+        return False
+    
+    runs = result.artifacts['duration_runs']
+    summary = result.artifacts['duration_summary']
+    
+    # Validation 1: All durations >= 1
+    if (runs['duration'] >= 1).all():
+        print(f"    ✓ All durations ≥ 1")
+        checks_passed += 1
+    else:
+        min_dur = runs['duration'].min()
+        print(f"    ✗ Found duration < 1: min={min_dur}")
+        checks_failed += 1
+    
+    # Validation 2: Sum of durations equals classified observations
+    total_duration = runs['duration'].sum()
+    classified_count = len(vol_df['regime'].dropna())
+    
+    if total_duration == classified_count:
+        print(f"    ✓ Duration sum ({total_duration:,}) matches classified ({classified_count:,})")
+        checks_passed += 1
+    else:
+        print(f"    ✗ Duration sum ({total_duration:,}) ≠ classified ({classified_count:,})")
+        checks_failed += 1
+    
+    # Validation 3: Runs > 0 for every regime
+    empty_regimes = []
+    for _, row in summary.iterrows():
+        if row['runs'] == 0:
+            empty_regimes.append(row['regime'])
+    
+    if not empty_regimes:
+        print(f"    ✓ All regimes have runs > 0")
+        checks_passed += 1
+    else:
+        print(f"    ⚠ Empty regimes: {empty_regimes}")
+        checks_passed += 1  # Not a failure, just a warning
+    
+    # Validation 4: Statistical consistency (min ≤ median ≤ max AND min ≤ mean ≤ max)
+    stats_valid = True
+    
+    for _, row in summary.iterrows():
+        if row["runs"] == 0:
+            continue
+        
+        # Median must lie within [min, max]
+        if not (row["min_duration"] <= row["median_duration"] <= row["max_duration"]):
+            print(f"    ✗ Median outside [min, max] for {row['regime']}: "
+                  f"min={row['min_duration']}, median={row['median_duration']:.1f}, "
+                  f"max={row['max_duration']}")
+            stats_valid = False
+        
+        # Mean must lie within [min, max]
+        if not (row["min_duration"] <= row["mean_duration"] <= row["max_duration"]):
+            print(f"    ✗ Mean outside [min, max] for {row['regime']}: "
+                  f"min={row['min_duration']}, mean={row['mean_duration']:.1f}, "
+                  f"max={row['max_duration']}")
+            stats_valid = False
+    
+    if stats_valid:
+        print(f"    ✓ Mean and median lie within [min, max] for all regimes")
+        checks_passed += 1
+    else:
+        checks_failed += 1
+    
+    # Display duration summary
+    print(f"\n    Duration Summary:")
+    print(summary.to_string(index=False))
+    
+    # Expected under H0
+    from atlas.modules.module002_volatility_persistence.duration_engine import DurationEngine
+    engine = DurationEngine(REGIME_LABELS)
+    expected = engine.get_expected_duration_under_independence(len(REGIME_LABELS))
+    
+    overall_mean = runs['duration'].mean()
+    print(f"\n    Overall mean duration: {overall_mean:.2f}")
+    print(f"    Expected under H0: {expected:.2f}")
+    
+    if overall_mean > expected * 1.5:
+        print(f"    Evidence AGAINST H0 - volatility is persistent")
+    else:
+        print(f"    Cannot strongly reject H0")
+    
+    print(f"\n    Result: {checks_passed} passed, {checks_failed} failed")
+    return checks_failed == 0
+
+
+def main():
+    """Test Module 002 Phase 4"""
+    
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 002 PHASE 4 TEST")
+    print("Volatility Persistence - Duration Analysis")
+    print("=" * 70)
+    
+    print("\n[1/4] Framework health check...")
+    checker = FrameworkChecker()
+    checker.run_all_checks()
+    
+    print("\n[2/4] Initializing registry...")
+    registry = AtlasRegistry()
+    
+    datasets = {
+        "BTC_15m": "data/raw/BTCUSD_15m.csv",
+        "BTC_1h": "data/raw/BTCUSD_1h.csv",
+        "BTC_4h": "data/raw/BTCUSD_4h.csv",
+    }
+    
+    missing = [name for name, path in datasets.items() if not Path(path).exists()]
+    if missing:
+        print(f"\n✗ Missing data files: {missing}")
+        return 1
+    
+    print("\n[3/4] Running Module 002 Phase 4...")
+    runner = ModuleRunner(registry=registry)
+    
+    results = runner.run_on_datasets(
+        module_class=VolatilityPersistenceResearch,
+        datasets=datasets,
+        output_base_dir="outputs/module002",
+        validate_after=False
+    )
+    
+    print("\n[4/4] Validating outputs...")
+    
+    all_valid = True
+    
+    for dataset_name, result in results.items():
+        if result.status == "completed":
+            print(f"\n{'='*60}")
+            print(f"Dataset: {dataset_name}")
+            print(f"{'='*60}")
+            
+            if 'volatility_dataframe' in result.artifacts:
+                vol_df = result.artifacts['volatility_dataframe']
+                p4 = test_phase4_outputs(result, vol_df, dataset_name)
+                if not p4:
+                    all_valid = False
+            else:
+                print(f"  ✗ No volatility DataFrame")
+                all_valid = False
+        else:
+            print(f"  ✗ {dataset_name}: Failed")
+            all_valid = False
+    
+    print("\n" + "=" * 70)
+    print("PHASE 4 SUMMARY")
+    print("=" * 70)
+    
+    if all_valid:
+        print("\n✓ All phases complete and validated")
+        print("\nOutput files:")
+        for ds in datasets:
+            print(f"  outputs/module002/VolatilityPersistence/{ds}/")
+        return 0
+    else:
+        print("\n✗ Validation failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

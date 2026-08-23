@@ -1,0 +1,18 @@
+# atlas/modules/module001_return_distribution/config.py
+"""
+Module 001 specific configuration
+Overrides or extends global config for return distribution analysis
+"""
+
+# Statistical thresholds
+NORMALITY_SIGNIFICANCE_LEVEL = 0.05
+TAIL_SIGMA_THRESHOLD = 2.0
+MIN_OBSERVATIONS_FOR_TESTS = 100
+
+# Autocorrelation settings
+MAX_AUTOCORR_LAGS = 100
+LJUNG_BOX_LAGS = 20
+
+# Export settings
+EXPORT_DECIMALS = 8
+INCLUDE_CHARTS = False  # Set to True when matplotlib charts are implemented

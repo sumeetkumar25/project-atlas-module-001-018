@@ -1,0 +1,23 @@
+# atlas/modules/module007_pullback_statistics/config.py
+"""
+Project Atlas
+Module 007 - Pullback Statistics
+Configuration
+"""
+
+MODULE_ID = "007"
+MODULE_NAME = "Pullback Statistics"
+MODULE_VERSION = "1.0.0"
+
+# Pullback detection parameters
+MIN_PULLBACK_BARS = 1
+MAX_PULLBACK_BARS = 200
+
+# Recovery confirmation (price must exceed this buffer past pullback start)
+RECOVERY_BUFFER = 0.0  # 0% buffer = must exceed pullback start price
+
+# Export control
+EXPORT_PULLBACKS = True
+
+# Module 005 dependency
+MODULE_005_OUTPUT = "trend_segments.csv"

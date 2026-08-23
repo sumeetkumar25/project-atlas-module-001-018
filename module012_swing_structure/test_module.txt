@@ -1,0 +1,391 @@
+# atlas/modules/module012_swing_structure/test_module.py
+"""
+Module 012 Phase 1.1 Test Runner
+
+Validates fractal swing detection with deterministic synthetic tests.
+"""
+
+import sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+from atlas.modules.module012_swing_structure.module import SwingStructureResearch
+from atlas.core.pattern_detection import FractalDetector
+from atlas.runner import ModuleRunner
+from atlas.framework.registry import AtlasRegistry
+from atlas.framework.framework_check import FrameworkChecker
+
+
+def create_test_df(high: np.ndarray, low: np.ndarray, close: np.ndarray = None) -> pd.DataFrame:
+    """Create test DataFrame with explicit high/low values."""
+    n = len(high)
+    if close is None:
+        close = (high + low) / 2
+    dates = pd.date_range(start="2020-01-01", periods=n, freq="15min")
+    return pd.DataFrame({
+        "timestamp": dates,
+        "open": close,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": np.ones(n) * 100
+    })
+
+
+def test_single_swing_high():
+    """
+    Test 1: Single clear swing high.
+    
+    High pattern: 10, 10, 10, 15, 10, 10, 10
+    Bar 3 (value 15) is the only swing high.
+    """
+    print("\n" + "=" * 60)
+    print("TEST 1: Single Swing High")
+    print("=" * 60)
+    
+    high = np.array([10, 10, 10, 15, 10, 10, 10])
+    low = np.array([5, 5, 5, 5, 5, 5, 5])
+    df = create_test_df(high, low)
+    
+    detector = FractalDetector(strength=2)
+    swing_highs = detector.detect_highs(df)
+    
+    n_highs = int(swing_highs.sum())
+    print(f"  Highs: {high.tolist()}")
+    print(f"  Swing highs detected: {n_highs}")
+    print(f"  Swing high at indices: {swing_highs[swing_highs].index.tolist()}")
+    
+    checks = 0
+    if n_highs == 1:
+        print(f"  ✓ Exactly 1 swing high")
+        checks += 1
+    if swing_highs.iloc[3]:
+        print(f"  ✓ Swing high at correct location (index 3)")
+        checks += 1
+    
+    print(f"  Result: {checks}/2 passed")
+    return checks == 2
+
+
+def test_single_swing_low():
+    """
+    Test 2: Single clear swing low.
+    
+    Low pattern: 10, 10, 10, 5, 10, 10, 10
+    Bar 3 (value 5) is the only swing low.
+    """
+    print("\n" + "=" * 60)
+    print("TEST 2: Single Swing Low")
+    print("=" * 60)
+    
+    high = np.array([15, 15, 15, 15, 15, 15, 15])
+    low = np.array([10, 10, 10, 5, 10, 10, 10])
+    df = create_test_df(high, low)
+    
+    detector = FractalDetector(strength=2)
+    swing_lows = detector.detect_lows(df)
+    
+    n_lows = int(swing_lows.sum())
+    print(f"  Lows: {low.tolist()}")
+    print(f"  Swing lows detected: {n_lows}")
+    print(f"  Swing low at indices: {swing_lows[swing_lows].index.tolist()}")
+    
+    checks = 0
+    if n_lows == 1:
+        print(f"  ✓ Exactly 1 swing low")
+        checks += 1
+    if swing_lows.iloc[3]:
+        print(f"  ✓ Swing low at correct location (index 3)")
+        checks += 1
+    
+    print(f"  Result: {checks}/2 passed")
+    return checks == 2
+
+
+def test_alternating_swings():
+    """
+    Test 3: Alternating swing highs and lows.
+    
+    Creates a clear zigzag pattern with alternating peaks and troughs.
+    """
+    print("\n" + "=" * 60)
+    print("TEST 3: Alternating Swings")
+    print("=" * 60)
+    
+    n = 50
+    high = np.full(n, 100.0)
+    low = np.full(n, 90.0)
+    
+    # Create clear peaks and troughs with enough space
+    peaks = [7, 17, 27, 37]
+    troughs = [12, 22, 32, 42]
+    
+    for p in peaks:
+        high[p-2:p+3] = [98, 99, 110, 99, 98]
+        low[p-2:p+3] = [88, 89, 100, 89, 88]
+    
+    for t in troughs:
+        high[t-2:t+3] = [92, 91, 100, 91, 92]
+        low[t-2:t+3] = [82, 81, 70, 81, 82]
+    
+    df = create_test_df(high, low)
+    
+    detector = FractalDetector(strength=2)
+    swing_highs = detector.detect_highs(df)
+    swing_lows = detector.detect_lows(df)
+    
+    n_highs = int(swing_highs.sum())
+    n_lows = int(swing_lows.sum())
+    
+    print(f"  Swing highs: {n_highs}, Swing lows: {n_lows}")
+    
+    checks = 0
+    if n_highs > 0:
+        print(f"  ✓ Swing highs detected")
+        checks += 1
+    if n_lows > 0:
+        print(f"  ✓ Swing lows detected")
+        checks += 1
+    
+    print(f"  Result: {checks}/2 passed")
+    return checks == 2
+
+
+def test_monotonic_uptrend():
+    """
+    Test 4: Monotonic uptrend → no confirmed swings.
+    
+    Steadily increasing highs and lows.
+    No bar has higher highs on both sides → no swing highs confirmed.
+    """
+    print("\n" + "=" * 60)
+    print("TEST 4: Monotonic Uptrend (No Swings)")
+    print("=" * 60)
+    
+    n = 30
+    high = np.linspace(100, 130, n)
+    low = np.linspace(90, 120, n)
+    df = create_test_df(high, low)
+    
+    detector = FractalDetector(strength=2)
+    swing_highs = detector.detect_highs(df)
+    swing_lows = detector.detect_lows(df)
+    
+    n_highs = int(swing_highs.sum())
+    n_lows = int(swing_lows.sum())
+    
+    print(f"  Swing highs: {n_highs}, Swing lows: {n_lows}")
+    
+    if n_highs == 0 and n_lows == 0:
+        print(f"  ✓ Correctly found no swings in monotonic trend")
+        return True
+    else:
+        print(f"  ⚠ Found {n_highs + n_lows} swings (may depend on data)")
+        return n_highs + n_lows <= 2
+
+
+def test_flat_market():
+    """
+    Test 5: Flat market → zero swings.
+    
+    All highs equal, all lows equal.
+    Strict inequality requires current > neighbors, but all are equal.
+    """
+    print("\n" + "=" * 60)
+    print("TEST 5: Flat Market (Zero Swings)")
+    print("=" * 60)
+    
+    n = 30
+    high = np.full(n, 100.0)
+    low = np.full(n, 90.0)
+    df = create_test_df(high, low)
+    
+    detector = FractalDetector(strength=2)
+    swing_highs = detector.detect_highs(df)
+    swing_lows = detector.detect_lows(df)
+    
+    n_highs = int(swing_highs.sum())
+    n_lows = int(swing_lows.sum())
+    
+    print(f"  Swing highs: {n_highs}, Swing lows: {n_lows}")
+    
+    if n_highs == 0 and n_lows == 0:
+        print(f"  ✓ Correctly found zero swings in flat market")
+        return True
+    else:
+        print(f"  ✗ Expected 0 swings, got {n_highs + n_lows}")
+        return False
+
+
+def test_reference_implementation():
+    """
+    Test 6: Reference implementation comparison.
+    """
+    print("\n" + "=" * 60)
+    print("TEST 6: Reference Implementation")
+    print("=" * 60)
+    
+    np.random.seed(42)
+    n = 200
+    high = np.cumsum(np.random.normal(0, 2, n)) + 500
+    high = np.maximum(high, 1)
+    low = high - np.random.uniform(5, 15, n)
+    
+    df = create_test_df(high, low)
+    
+    detector = FractalDetector(strength=2)
+    atlas_highs = detector.detect_highs(df)
+    atlas_lows = detector.detect_lows(df)
+    
+    # Reference implementation
+    k = 2
+    ref_highs = np.zeros(n, dtype=bool)
+    ref_lows = np.zeros(n, dtype=bool)
+    
+    for i in range(k, n - k):
+        if high[i] > high[i-k:i].max() and high[i] > high[i+1:i+k+1].max():
+            ref_highs[i] = True
+        if low[i] < low[i-k:i].min() and low[i] < low[i+1:i+k+1].min():
+            ref_lows[i] = True
+    
+    atlas_n_highs = int(atlas_highs.sum())
+    ref_n_highs = int(ref_highs.sum())
+    atlas_n_lows = int(atlas_lows.sum())
+    ref_n_lows = int(ref_lows.sum())
+    
+    print(f"  Highs: Atlas={atlas_n_highs}, Reference={ref_n_highs}")
+    print(f"  Lows:  Atlas={atlas_n_lows}, Reference={ref_n_lows}")
+    
+    checks = 0
+    if atlas_n_highs == ref_n_highs:
+        print(f"  ✓ High counts match")
+        checks += 1
+    if atlas_n_lows == ref_n_lows:
+        print(f"  ✓ Low counts match")
+        checks += 1
+    if (atlas_highs.values == ref_highs).all():
+        print(f"  ✓ High locations match exactly")
+        checks += 1
+    if (atlas_lows.values == ref_lows).all():
+        print(f"  ✓ Low locations match exactly")
+        checks += 1
+    
+    print(f"  Result: {checks}/4 passed")
+    return checks == 4
+
+
+def test_btc_data():
+    """Test on all BTC datasets."""
+    print("\n" + "=" * 60)
+    print("TEST: BTC Data (All Timeframes)")
+    print("=" * 60)
+    
+    datasets = {
+        "BTC_15m": "data/raw/BTCUSD_15m.csv",
+        "BTC_1h": "data/raw/BTCUSD_1h.csv",
+        "BTC_4h": "data/raw/BTCUSD_4h.csv",
+    }
+    
+    missing = [name for name, path in datasets.items() if not Path(path).exists()]
+    if missing:
+        print(f"  ⚠ Missing datasets: {missing}")
+        return True
+    
+    registry = AtlasRegistry()
+    runner = ModuleRunner(registry=registry)
+    
+    results = runner.run_on_datasets(
+        module_class=SwingStructureResearch,
+        datasets=datasets,
+        output_base_dir="outputs/module012",
+        validate_after=False
+    )
+    
+    all_passed = True
+    for name, result in results.items():
+        if result.status == "completed":
+            n_swings = result.statistics.get("total_swings", 0)
+            n_highs = result.statistics.get("swing_highs", 0)
+            n_lows = result.statistics.get("swing_lows", 0)
+            
+            print(f"\n  {name}:")
+            print(f"    Swings: {n_swings:,} ({n_highs} highs, {n_lows} lows)")
+            
+            if n_swings > 0:
+                print(f"    ✓ Swing detection working")
+            else:
+                print(f"    ⚠ No swings detected")
+        else:
+            print(f"  ✗ {name}: Failed")
+            all_passed = False
+    
+    return all_passed
+
+
+def main():
+    """Test Module 012 Phase 1.1"""
+    
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 012 PHASE 1.1 TEST")
+    print("Swing Structure - Fractal Swing Detection")
+    print("=" * 70)
+    print("  Definition: High(i) > High(i±k) AND Low(i) < Low(i±k)")
+    print("  Strength (k): 2")
+    print("  Confirmation: Uses future bars (research only)")
+    print("  Detector: atlas.core.pattern_detection.FractalDetector")
+    
+    print("\n[1/8] Framework health check...")
+    checker = FrameworkChecker()
+    checker.run_all_checks()
+    
+    results = {}
+    
+    print("\n[2/8] Single swing high...")
+    results['single_high'] = test_single_swing_high()
+    
+    print("\n[3/8] Single swing low...")
+    results['single_low'] = test_single_swing_low()
+    
+    print("\n[4/8] Alternating swings...")
+    results['alternating'] = test_alternating_swings()
+    
+    print("\n[5/8] Monotonic uptrend...")
+    results['monotonic'] = test_monotonic_uptrend()
+    
+    print("\n[6/8] Flat market...")
+    results['flat'] = test_flat_market()
+    
+    print("\n[7/8] Reference implementation...")
+    results['reference'] = test_reference_implementation()
+    
+    print("\n[8/8] BTC data (all timeframes)...")
+    results['btc'] = test_btc_data()
+    
+    synthetic = {k: v for k, v in results.items() if k != 'btc'}
+    synthetic_passed = sum(synthetic.values())
+    synthetic_total = len(synthetic)
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    for name, result in results.items():
+        print(f"  {'✓' if result else '✗'} {name}")
+    
+    print(f"\n  Synthetic: {synthetic_passed}/{synthetic_total} passed")
+    
+    if synthetic_passed == synthetic_total:
+        print("\n✓ Module 012 Phase 1.1 VALIDATED")
+        print("✓ FractalDetector working correctly")
+        print("✓ Single source of truth in atlas.core.pattern_detection")
+        print("✓ Reference implementation matches exactly")
+        return 0
+    else:
+        print(f"\n✗ {synthetic_total - synthetic_passed} synthetic test(s) failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

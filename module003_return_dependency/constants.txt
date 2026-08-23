@@ -1,0 +1,20 @@
+# atlas/modules/module003_return_dependency/constants.py
+"""
+Module 003 Constants
+Return Dependency Analysis - Phase 1
+"""
+
+MODULE_ID = "003"
+MODULE_NAME = "Return Dependency Analysis"
+MODULE_VERSION = "0.1.0-phase1"
+
+# Maximum lag to evaluate for autocorrelation
+MAX_AUTOCORRELATION_LAG = 100
+
+# Significance level for hypothesis tests
+SIGNIFICANCE_LEVEL = 0.05
+
+# Confidence intervals for ACF plot
+# Under H0 (no autocorrelation), ACF ~ N(0, 1/sqrt(n))
+# 95% CI: ±1.96/sqrt(n)
+CONFIDENCE_LEVEL = 0.95

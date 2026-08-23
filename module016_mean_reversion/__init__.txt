@@ -1,0 +1,11 @@
+# atlas/modules/module016_mean_reversion/__init__.py
+"""
+Module 016
+Mean Reversion
+"""
+
+from .module import MeanReversionResearch
+
+__all__ = [
+    "MeanReversionResearch",
+]

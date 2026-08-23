@@ -1,0 +1,86 @@
+# atlas/modules/module013_range_expansion/validation.py
+"""
+Module 013 Validation
+Phase 1.0 - Architecture verification only.
+"""
+
+from typing import List
+
+
+def validate_pipeline(module) -> List[str]:
+    """
+    Verify pipeline architecture is correct.
+    
+    Checks:
+    - All 7 expected steps are registered
+    - Step names are correct
+    - Steps execute in the correct order
+    
+    Args:
+        module: RangeExpansionResearch instance
+        
+    Returns:
+        List of issues (empty if valid)
+    """
+    issues = []
+    
+    expected_steps = [
+        "true_range",
+        "atr",
+        "ratio",
+        "percentiles",
+        "states",
+        "segments",
+        "statistics",
+    ]
+    
+    actual_steps = module.pipeline_names
+    
+    # Check 1: Correct number of steps
+    if len(actual_steps) != len(expected_steps):
+        issues.append(
+            f"Step count mismatch: expected {len(expected_steps)}, got {len(actual_steps)}"
+        )
+    
+    # Check 2: Step names are correct
+    if actual_steps != expected_steps:
+        issues.append(
+            f"Step names mismatch:\n  Expected: {expected_steps}\n  Got:      {actual_steps}"
+        )
+    
+    return issues
+
+
+def validate_skeleton_execution(result) -> List[str]:
+    """
+    Verify skeleton pipeline executed correctly.
+    
+    All steps should return stub markers.
+    
+    Args:
+        result: ResearchResult from pipeline execution
+        
+    Returns:
+        List of issues (empty if valid)
+    """
+    issues = []
+    
+    expected_stubs = [
+        "true_range_status",
+        "atr_status",
+        "range_ratio_status",
+        "percentiles_status",
+        "states_status",
+        "segments_status",
+        "statistics_status",
+    ]
+    
+    stats = result.statistics
+    
+    for stub_key in expected_stubs:
+        if stub_key not in stats:
+            issues.append(f"Missing stub key: {stub_key}")
+        elif stats[stub_key] != "stub":
+            issues.append(f"Expected 'stub' for {stub_key}, got '{stats[stub_key]}'")
+    
+    return issues

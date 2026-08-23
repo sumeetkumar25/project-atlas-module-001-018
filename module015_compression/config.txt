@@ -1,0 +1,24 @@
+# atlas/modules/module015_compression/config.py
+"""
+Module 015 Configuration
+Compression Analysis
+"""
+
+MODULE_ID = "015"
+MODULE_NAME = "Compression Analysis"
+MODULE_VERSION = "1.0.0"
+
+# ATR window for range calculations
+ATR_WINDOW = 14
+
+# Percentile window for rolling percentile
+PERCENTILE_WINDOW = 252
+
+# Compression threshold (percentile below which is compression)
+COMPRESSION_THRESHOLD = 25
+
+# Post-compression lookahead bars
+POST_COMPRESSION_LOOKAHEAD = [1, 5, 10, 20]
+
+# Minimum segment length
+MIN_SEGMENT_LENGTH = 1

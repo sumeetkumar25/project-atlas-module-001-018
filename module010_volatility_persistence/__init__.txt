@@ -1,0 +1,7 @@
+# atlas/modules/module010_volatility_persistence/__init__.py
+"""
+Module 010: Volatility Persistence Analysis
+
+Phase 2.3: Returns + Volatility + Percentiles implemented.
+Steps 4-7 remain stubs.
+"""

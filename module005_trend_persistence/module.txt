@@ -1,0 +1,496 @@
+"""
+Module 005: Trend Persistence Analysis - Phase 1
+
+Segments BTC returns into consecutive directional trends.
+Measures how long up-trends and down-trends persist.
+
+FIXED:
+- Robust empty DataFrame handling with explicit columns
+- Correct expected_length calculation using actual direction probabilities
+- Graceful handling of edge cases (all flat, no segments)
+- Exports per-candle features for downstream modules
+"""
+
+from typing import Dict, Any, Optional
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.core.returns_utils import log_returns
+from atlas.framework.protocol import ResearchProtocol, ModuleStatus, ModuleCategory
+from atlas.framework.registry import AtlasRegistry
+
+from .config import (
+    LOOKBACK_WINDOWS,
+    MIN_TREND_LENGTH,
+    MIN_RETURN,
+    MODULE_ID,
+    MODULE_NAME,
+    MODULE_VERSION,
+    UP_TREND,
+    DOWN_TREND,
+    FLAT
+)
+from .protocol import PROTOCOL
+
+MODULE_INFO = {
+    "id": MODULE_ID,
+    "name": MODULE_NAME,
+    "version": MODULE_VERSION,
+    "author": "Project Atlas",
+    "phase": "Phase 1 - Trend Segmentation",
+    "requires": ["000", "001"],
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": ["trend_segments", "trend_summary", "trend_direction_series"],
+    "min_trend_length": MIN_TREND_LENGTH
+}
+
+# Expected columns for trend_segments DataFrame
+TREND_SEGMENT_COLUMNS = [
+    "segment_id",
+    "start_idx",
+    "end_idx",
+    "direction",
+    "direction_label",
+    "length",
+    "start_timestamp",
+    "end_timestamp",
+    "cumulative_return",
+    "mean_return",
+]
+
+
+class TrendPersistenceResearch(BaseResearchModule):
+    """
+    Module 005: Trend Persistence Analysis - Phase 1
+    
+    Phase 1: Identifies consecutive candles moving in the same direction.
+    Each uninterrupted sequence of up/down candles is a "trend segment."
+    
+    MIN_TREND_LENGTH can be temporarily set to 1 for validation testing.
+    """
+    
+    PROTOCOL = ResearchProtocol(
+        module_id=MODULE_ID,
+        module_name=MODULE_NAME,
+        category=ModuleCategory.REGIME,
+        question=PROTOCOL["research_question"],
+        hypothesis=PROTOCOL["null_hypothesis"],
+        rationale=PROTOCOL["rationale"],
+        methodology=PROTOCOL["methodology"],
+        statistics=PROTOCOL["statistics"],
+        depends_on=["000", "001"],
+        required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+        author="Project Atlas",
+        version=MODULE_VERSION,
+        status=ModuleStatus.PLANNED,
+        produces=["trend_segments", "trend_summary"]
+    )
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(
+            module_name="TrendPersistence",
+            module_version=MODULE_VERSION
+        )
+        self.registry = registry or AtlasRegistry()
+        
+        existing = self.registry.get_module(MODULE_ID)
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        
+        self.returns: Optional[pd.Series] = None
+        self.direction: Optional[pd.Series] = None
+        self.trend_segments: Optional[pd.DataFrame] = None
+        
+        # Allow temporary override for validation testing
+        self.MIN_TREND_LENGTH = MIN_TREND_LENGTH
+        
+        # Direction counts for expected length calculation
+        self._up_candles: int = 0
+        self._down_candles: int = 0
+        self._total_candles: int = 0
+    
+    def _register_pipeline_steps(self):
+        """Register Phase 1 computation steps"""
+        self.pipeline_steps = [
+            ("returns", self._calculate_returns),
+            ("trend_direction", self._trend_direction),
+            ("trend_segments", self._trend_segments),
+            ("summary", self._trend_summary),
+        ]
+    
+    # ============================================================
+    # Step 1: Calculate Returns
+    # ============================================================
+    
+    def _calculate_returns(self) -> Dict[str, Any]:
+        """Calculate log returns using shared Atlas utility"""
+        self.logger.info("Calculating log returns from close prices")
+        
+        self.returns = log_returns(self.df["close"])
+        
+        self.logger.metric("Return observations", f"{len(self.returns):,}")
+        self.logger.metric("Mean return", f"{self.returns.mean():.8f}")
+        self.logger.metric("Std return", f"{self.returns.std():.8f}")
+        
+        return {
+            "return_observations": len(self.returns),
+            "return_mean": float(self.returns.mean()),
+            "return_std": float(self.returns.std())
+        }
+    
+    # ============================================================
+    # Step 2: Trend Direction
+    # ============================================================
+    
+    def _trend_direction(self) -> Dict[str, Any]:
+        """
+        Determine trend direction for each candle.
+        
+        +1 = Up, -1 = Down, 0 = Flat (below threshold)
+        """
+        self.logger.info("Determining trend direction for each candle")
+        
+        direction = np.sign(self.returns)
+        
+        # Apply minimum return threshold
+        if MIN_RETURN > 0:
+            direction[np.abs(self.returns) < MIN_RETURN] = FLAT
+        
+        self.direction = direction.astype(int)
+        
+        # Store counts for expected length calculation
+        self._up_candles = int((self.direction == UP_TREND).sum())
+        self._down_candles = int((self.direction == DOWN_TREND).sum())
+        self._total_candles = len(self.direction)
+        flat_count = int((self.direction == FLAT).sum())
+        
+        self.logger.metric("Up candles", f"{self._up_candles:,} ({self._up_candles/self._total_candles*100:.1f}%)")
+        self.logger.metric("Down candles", f"{self._down_candles:,} ({self._down_candles/self._total_candles*100:.1f}%)")
+        self.logger.metric("Flat candles", f"{flat_count:,} ({flat_count/self._total_candles*100:.1f}%)")
+        
+        return {
+            "up_candles": self._up_candles,
+            "down_candles": self._down_candles,
+            "flat_candles": flat_count
+        }
+    
+    # ============================================================
+    # Step 3: Trend Segmentation (Core Algorithm)
+    # ============================================================
+    
+    def _trend_segments(self) -> Dict[str, Any]:
+        """
+        Segment consecutive same-direction candles into trends.
+        
+        Uses self.MIN_TREND_LENGTH (can be overridden for testing).
+        """
+        min_len = self.MIN_TREND_LENGTH
+        self.logger.info(f"Segmenting consecutive trends (min length={min_len})")
+        
+        # Get timestamps aligned with returns
+        if 'timestamp' in self.df.columns:
+            timestamps = self.df['timestamp'].iloc[1:].reset_index(drop=True)
+        else:
+            timestamps = pd.Series(range(len(self.returns)))
+        
+        segments = []
+        current_dir = self.direction.iloc[0]
+        current_start = 0
+        segment_id = 0
+        
+        # Walk through each candle
+        for i in range(1, len(self.direction)):
+            next_dir = self.direction.iloc[i]
+            
+            if next_dir != current_dir or next_dir == FLAT:
+                length = i - current_start
+                
+                if current_dir != FLAT and length >= min_len:
+                    segment_returns = self.returns.iloc[current_start:i]
+                    cumulative_return = segment_returns.sum()
+                    
+                    segments.append({
+                        "segment_id": segment_id,
+                        "start_idx": current_start,
+                        "end_idx": i - 1,
+                        "direction": int(current_dir),
+                        "direction_label": "Up" if current_dir == UP_TREND else "Down",
+                        "length": length,
+                        "start_timestamp": timestamps.iloc[current_start] if current_start < len(timestamps) else None,
+                        "end_timestamp": timestamps.iloc[i - 1] if i - 1 < len(timestamps) else None,
+                        "cumulative_return": float(cumulative_return),
+                        "mean_return": float(cumulative_return / length) if length > 0 else 0.0
+                    })
+                    segment_id += 1
+                
+                current_dir = next_dir
+                current_start = i
+        
+        # Record final segment
+        final_length = len(self.direction) - current_start
+        if current_dir != FLAT and final_length >= min_len:
+            segment_returns = self.returns.iloc[current_start:]
+            cumulative_return = segment_returns.sum()
+            
+            segments.append({
+                "segment_id": segment_id,
+                "start_idx": current_start,
+                "end_idx": len(self.direction) - 1,
+                "direction": int(current_dir),
+                "direction_label": "Up" if current_dir == UP_TREND else "Down",
+                "length": final_length,
+                "start_timestamp": timestamps.iloc[current_start] if current_start < len(timestamps) else None,
+                "end_timestamp": timestamps.iloc[-1] if len(timestamps) > 0 else None,
+                "cumulative_return": float(cumulative_return),
+                "mean_return": float(cumulative_return / final_length) if final_length > 0 else 0.0
+            })
+        
+        # FIXED: Create DataFrame with explicit columns for robustness
+        # Even if segments is empty, the DataFrame will have correct columns
+        self.trend_segments = pd.DataFrame(segments, columns=TREND_SEGMENT_COLUMNS)
+        
+        # Handle empty case gracefully
+        if self.trend_segments.empty:
+            self.logger.warning(
+                f"No trend segments satisfied the minimum length of {min_len}. "
+                f"Try reducing MIN_TREND_LENGTH for this dataset."
+            )
+            self.result.artifacts["trend_segments"] = self.trend_segments
+            return {
+                "total_segments": 0,
+                "up_segments": 0,
+                "down_segments": 0
+            }
+        
+        # Store as artifact
+        self.result.artifacts["trend_segments"] = self.trend_segments
+        
+        n_segments = len(self.trend_segments)
+        up_segments = int((self.trend_segments['direction'] == UP_TREND).sum())
+        down_segments = int((self.trend_segments['direction'] == DOWN_TREND).sum())
+        
+        self.logger.metric("Total segments", f"{n_segments:,}")
+        self.logger.metric("Up segments", f"{up_segments:,}")
+        self.logger.metric("Down segments", f"{down_segments:,}")
+        
+        if n_segments > 0:
+            self.logger.metric("Mean length", f"{self.trend_segments['length'].mean():.2f}")
+            self.logger.metric("Max length", f"{self.trend_segments['length'].max()}")
+        
+        return {
+            "total_segments": n_segments,
+            "up_segments": up_segments,
+            "down_segments": down_segments
+        }
+    
+    # ============================================================
+    # Step 4: Trend Summary Statistics
+    # ============================================================
+    
+    def _trend_summary(self) -> Dict[str, Any]:
+        """
+        Compute summary statistics for trend segments.
+        
+        FIXED: Uses stored candle counts for correct expected length calculation.
+        """
+        self.logger.info("Computing trend summary statistics")
+        
+        # Handle empty segments gracefully
+        if self.trend_segments is None or self.trend_segments.empty:
+            self.logger.warning("No trend segments to summarize")
+            stats = {
+                "total_segments": 0,
+                "mean_trend_length": 0.0,
+                "median_trend_length": 0.0,
+                "max_trend_length": 0,
+                "up_trend_count": 0,
+                "down_trend_count": 0,
+                "expected_length_under_h0": 0.0,
+                "observed_vs_expected_ratio": 0.0
+            }
+            for key, value in stats.items():
+                self.result.statistics[key] = value
+            return stats
+        
+        stats = {}
+        
+        # Overall statistics
+        lengths = self.trend_segments['length']
+        stats["total_segments"] = len(self.trend_segments)
+        stats["mean_trend_length"] = float(lengths.mean())
+        stats["median_trend_length"] = float(lengths.median())
+        stats["max_trend_length"] = int(lengths.max())
+        stats["min_trend_length"] = int(lengths.min())
+        stats["std_trend_length"] = float(lengths.std())
+        
+        # Up trend statistics
+        up_mask = self.trend_segments['direction'] == UP_TREND
+        up_segments = self.trend_segments[up_mask]
+        stats["up_trend_count"] = len(up_segments)
+        if len(up_segments) > 0:
+            stats["up_mean_length"] = float(up_segments['length'].mean())
+            stats["up_median_length"] = float(up_segments['length'].median())
+            stats["up_max_length"] = int(up_segments['length'].max())
+        else:
+            stats["up_mean_length"] = 0.0
+            stats["up_median_length"] = 0.0
+            stats["up_max_length"] = 0
+        
+        # Down trend statistics
+        down_mask = self.trend_segments['direction'] == DOWN_TREND
+        down_segments = self.trend_segments[down_mask]
+        stats["down_trend_count"] = len(down_segments)
+        if len(down_segments) > 0:
+            stats["down_mean_length"] = float(down_segments['length'].mean())
+            stats["down_median_length"] = float(down_segments['length'].median())
+            stats["down_max_length"] = int(down_segments['length'].max())
+        else:
+            stats["down_mean_length"] = 0.0
+            stats["down_median_length"] = 0.0
+            stats["down_max_length"] = 0
+        
+        # Length distribution percentiles
+        for percentile in [25, 50, 75, 90, 95, 99]:
+            stats[f"length_p{percentile}"] = float(np.percentile(lengths, percentile))
+        
+        # FIXED: Correct expected length calculation
+        # Use actual direction probabilities from the data
+        total_directional = self._up_candles + self._down_candles
+        
+        if total_directional > 0:
+            # Probability of staying in same direction under H0
+            # If directions are independent, P(stay) = proportion of that direction
+            # Weighted average of continuation probability
+            p_up = self._up_candles / total_directional
+            p_down = self._down_candles / total_directional
+            
+            # Under independence: P(continue | up) = p_up, P(continue | down) = p_down
+            # Expected length = weighted average of 1/(1-p) for each direction
+            if p_up < 1.0 and p_down < 1.0:
+                expected_up = 1.0 / (1.0 - p_up) if p_up < 1.0 else float('inf')
+                expected_down = 1.0 / (1.0 - p_down) if p_down < 1.0 else float('inf')
+                expected_length = p_up * expected_up + p_down * expected_down
+            else:
+                expected_length = 2.0  # Fallback for edge case
+        else:
+            expected_length = 2.0  # No directional candles
+        
+        stats["expected_length_under_h0"] = float(expected_length)
+        stats["observed_vs_expected_ratio"] = float(
+            stats["mean_trend_length"] / expected_length
+        ) if expected_length > 0 else 0.0
+        
+        # Display summary
+        self.logger.info(f"\nTrend Summary (min_length={self.MIN_TREND_LENGTH}):")
+        self.logger.info(f"  Total segments: {stats['total_segments']:,}")
+        self.logger.info(f"  Up trends: {stats['up_trend_count']:,} (mean: {stats['up_mean_length']:.2f})")
+        self.logger.info(f"  Down trends: {stats['down_trend_count']:,} (mean: {stats['down_mean_length']:.2f})")
+        self.logger.info(f"  Overall mean: {stats['mean_trend_length']:.2f}")
+        self.logger.info(f"  Overall median: {stats['median_trend_length']:.1f}")
+        self.logger.info(f"  Maximum: {stats['max_trend_length']}")
+        self.logger.info(f"  Expected under H0: {expected_length:.2f}")
+        self.logger.info(f"  Ratio: {stats['observed_vs_expected_ratio']:.2f}x")
+        
+        # Evidence assessment
+        if stats['observed_vs_expected_ratio'] > 1.5:
+            self.logger.info(f"\n  Observed trends {stats['observed_vs_expected_ratio']:.1f}x longer than expected")
+            self.logger.info("  Evidence AGAINST H0 - trends exhibit persistence")
+        elif stats['observed_vs_expected_ratio'] > 1.2:
+            self.logger.info(f"\n  Observed trends slightly longer than expected")
+            self.logger.info("  Weak evidence of trend persistence")
+        else:
+            self.logger.info(f"\n  Trend lengths close to random expectation")
+            self.logger.info("  Cannot reject H0")
+        
+        # Store all statistics
+        for key, value in stats.items():
+            self.result.statistics[key] = value
+        
+        # Create summary artifact
+        summary_data = {
+            "metric": [
+                "up_count", "down_count", "total", "mean_length", "median_length",
+                "max_length", "expected_under_h0", "observed_vs_expected",
+                "up_mean", "down_mean", "up_max", "down_max"
+            ],
+            "value": [
+                stats["up_trend_count"],
+                stats["down_trend_count"],
+                stats["total_segments"],
+                stats["mean_trend_length"],
+                stats["median_trend_length"],
+                stats["max_trend_length"],
+                stats["expected_length_under_h0"],
+                stats["observed_vs_expected_ratio"],
+                stats["up_mean_length"],
+                stats["down_mean_length"],
+                stats["up_max_length"],
+                stats["down_max_length"]
+            ]
+        }
+        self.result.artifacts["trend_summary"] = pd.DataFrame(summary_data)
+        
+        return stats
+    
+    # ============================================================
+    # Compute
+    # ============================================================
+    
+    def compute(self) -> Dict[str, Any]:
+        """Execute all pipeline steps"""
+        all_results = {}
+        
+        for name, step in self.pipeline_steps:
+            self.logger.info(f"Step: {name}")
+            step_result = step()
+            all_results.update(step_result)
+        
+        # ============================================================
+        # Build Feature DataFrame for downstream modules
+        # ============================================================
+        
+        feature_df = pd.DataFrame({
+            "timestamp": self.df["timestamp"],
+            "trend_direction": 0,
+            "trend_run_length": 0,
+            "trend_persistence": 0.0
+        })
+        
+        # Map each detected trend back to every candle
+        # Note: +1 offset because returns has N-1 rows while price has N rows
+        for _, seg in self.trend_segments.iterrows():
+            start = int(seg["start_idx"]) + 1
+            end = int(seg["end_idx"]) + 1
+            direction = int(seg["direction"])
+            length = int(seg["length"])
+            
+            for i in range(length):
+                idx = start + i
+                
+                if idx >= len(feature_df):
+                    break
+                
+                feature_df.loc[idx, "trend_direction"] = direction
+                feature_df.loc[idx, "trend_run_length"] = i + 1
+                feature_df.loc[idx, "trend_persistence"] = (i + 1) / length
+        
+        # Export feature dataframe
+        self.result.artifacts["features"] = feature_df
+        
+        self.result.status = "completed"
+        self.logger.success("Phase 1 complete: Trend segmentation finished")
+        
+        return all_results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        """Execute research from file"""
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df: pd.DataFrame,
+                      dataset_id: str = "in_memory",
+                      output_dir: Optional[str] = None):
+        """Execute research from DataFrame"""
+        return super().run_dataframe(df, dataset_id, output_dir)

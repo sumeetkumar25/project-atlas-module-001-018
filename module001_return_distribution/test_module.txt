@@ -1,0 +1,126 @@
+# atlas/modules/module001_return_distribution/test_module.py
+"""
+Module 001 Test Runner v2.1
+Registry-integrated test execution with proper error handling.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+from atlas.modules.module001_return_distribution.module import ReturnDistributionResearch
+from atlas.runner import ModuleRunner
+from atlas.framework.registry import AtlasRegistry
+from atlas.framework.framework_check import FrameworkChecker
+
+def main():
+    """Test Module 001 with full registry integration"""
+    
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 001 TEST")
+    print("Return Distribution Analysis")
+    print("Registry-Integrated Execution")
+    print("=" * 70)
+    
+    # Step 1: Framework health check
+    print("\n[1/4] Running framework health check...")
+    checker = FrameworkChecker()
+    framework_ok = checker.run_all_checks()
+    if not framework_ok:
+        print("\n⚠ Framework has critical issues. Review before proceeding.\n")
+    else:
+        print("\n✓ Framework health check passed\n")
+    
+    # Step 2: Initialize registry
+    print("[2/4] Initializing registry...")
+    registry = AtlasRegistry()
+    
+    # Show current state
+    stats = registry.get_statistics()
+    print(f"  Modules: {stats['total_modules']}")
+    print(f"  Datasets: {stats['total_datasets']}")
+    
+    # Step 3: Define datasets
+    datasets = {
+        "BTC_15m": "data/raw/BTCUSD_15m.csv",
+        "BTC_1h": "data/raw/BTCUSD_1h.csv",
+        "BTC_4h": "data/raw/BTCUSD_4h.csv",
+    }
+    
+    # Verify files exist
+    missing_files = []
+    for name, filepath in datasets.items():
+        if not Path(filepath).exists():
+            missing_files.append(f"{name} ({filepath})")
+    
+    if missing_files:
+        print(f"\n✗ Missing data files:")
+        for mf in missing_files:
+            print(f"  - {mf}")
+        print("\nPlease ensure data files are in data/raw/")
+        return 1
+    
+    # Step 4: Run module
+    print("\n[3/4] Running Module 001 across datasets...")
+    runner = ModuleRunner(registry=registry)
+    
+    try:
+        results = runner.run_on_datasets(
+            module_class=ReturnDistributionResearch,
+            datasets=datasets,
+            output_base_dir="outputs/module001"
+        )
+    except Exception as e:
+        print(f"\n✗ Module execution failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+    
+    # Step 5: Validate and report
+    print("\n[4/4] Validation and Registry Status")
+    print("-" * 70)
+    
+    all_passed = True
+    for name, result in results.items():
+        if result.status == "completed":
+            print(f"  ✓ {name}: Completed ({len(result.statistics)} metrics)")
+        else:
+            print(f"  ✗ {name}: Failed - {result.errors}")
+            all_passed = False
+    
+    # Registry status after execution
+    print(f"\nPost-Execution Registry Status:")
+    stats = registry.get_statistics()
+    print(f"  Modules registered: {stats['total_modules']}")
+    print(f"  Datasets registered: {stats['total_datasets']}")
+    
+    module = registry.get_module("001")
+    if module:
+        print(f"  Module 001 status: {module.status.value}")
+        print(f"  Module 001 validated: {module.validated}")
+    
+    # Print outputs summary
+    print(f"\nOutput Files:")
+    output_base = Path("outputs/module001/ReturnDistribution")
+    if output_base.exists():
+        for ds_dir in output_base.iterdir():
+            if ds_dir.is_dir():
+                files = list(ds_dir.glob("*"))
+                print(f"\n  {ds_dir.name}/")
+                for f in sorted(files):
+                    size_kb = f.stat().st_size / 1024
+                    print(f"    {f.name} ({size_kb:.1f} KB)")
+    
+    # Print registry report
+    print("\n" + registry.generate_registry_report())
+    
+    if all_passed:
+        print("\n✓ Module 001 execution complete and successful")
+        return 0
+    else:
+        print("\n⚠ Module 001 completed with some failures")
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

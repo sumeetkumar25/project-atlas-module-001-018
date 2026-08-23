@@ -1,0 +1,311 @@
+# atlas/modules/module013_range_expansion/module.py
+"""
+Module 013: Range Expansion & Compression - Phase 1.6 (FINAL)
+
+All 7 pipeline steps implemented.
+FIXED: Statistics keys consistent. Occupancy and persistence exported as artifacts.
+"""
+
+from typing import Dict, Any, Optional, List
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.core.volatility import RangeMetrics
+from atlas.core.volatility.state_constants import (
+    STATE_UNKNOWN, STATE_COMPRESSION, STATE_NORMAL,
+    STATE_EXPANSION, STATE_EXTREME, STATE_LABELS, state_code_to_label
+)
+from atlas.core.volatility.state_validation import classify_states
+from atlas.core.volatility.segment_validation import detect_segments
+from atlas.core.volatility.segment_statistics import SegmentStatistics
+from atlas.framework.registry import AtlasRegistry
+
+from .config import (
+    MODULE_ID, MODULE_NAME, MODULE_VERSION,
+    ATR_WINDOW, PERCENTILE_WINDOW,
+    LOW_PERCENTILE, HIGH_PERCENTILE, EXTREME_PERCENTILE,
+    MIN_SEGMENT_LENGTH,
+)
+from .protocol import PROTOCOL
+
+MODULE_INFO = {
+    "id": MODULE_ID, "name": MODULE_NAME, "version": MODULE_VERSION,
+    "author": "Project Atlas",
+    "phase": "Phase 1.6 (FINAL) - All 7 steps implemented",
+    "requires": ["000"],
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": ["true_range", "atr", "range_ratio", "range_percentile",
+                 "expansion_states", "volatility_segments", "behavior_statistics",
+                 "transition_matrix", "duration_distribution",
+                 "occupancy_statistics", "persistence_statistics"],
+    "status": "Research Complete - 7/7 steps implemented",
+    "volatility_core": "atlas.core.volatility",
+}
+
+
+class RangeExpansionResearch(BaseResearchModule):
+    """Module 013: Range Expansion & Compression - Phase 1.6 (FINAL)"""
+    
+    PROTOCOL = PROTOCOL
+    MODULE_INFO = MODULE_INFO
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(module_name=MODULE_NAME, module_version=MODULE_VERSION)
+        self.registry = registry or AtlasRegistry()
+        existing = self.registry.get_module(MODULE_ID)
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        self.true_range: Optional[pd.Series] = None
+        self.atr: Optional[pd.Series] = None
+        self.range_ratio: Optional[pd.Series] = None
+        self.range_percentile: Optional[pd.Series] = None
+        self.state: Optional[pd.Series] = None
+        self.segments: Optional[pd.DataFrame] = None
+    
+    def _register_pipeline_steps(self):
+        self.pipeline_steps = [
+            ("true_range", self._calculate_true_range),
+            ("atr", self._calculate_atr),
+            ("ratio", self._calculate_range_ratio),
+            ("percentiles", self._calculate_percentiles),
+            ("states", self._assign_states),
+            ("segments", self._detect_segments),
+            ("statistics", self._compute_statistics),
+        ]
+    
+    @property
+    def pipeline_names(self) -> List[str]:
+        return [name for name, _ in self.pipeline_steps]
+    
+    def get_config_snapshot(self) -> Dict[str, Any]:
+        return {
+            "module_name": self.module_name, "module_version": self.module_version,
+            "atr_window": ATR_WINDOW, "percentile_window": PERCENTILE_WINDOW,
+            "state_boundaries": f"<{LOW_PERCENTILE}=Compression, ≥{EXTREME_PERCENTILE}=Extreme",
+        }
+    
+    def get_protocol_snapshot(self) -> Dict[str, Any]:
+        return {
+            "question": PROTOCOL.question, "hypothesis": PROTOCOL.hypothesis,
+            "methodology": PROTOCOL.methodology, "depends_on": PROTOCOL.depends_on,
+        }
+    
+    # ---- Step 1: True Range ----
+    def _calculate_true_range(self) -> Dict[str, Any]:
+        self.logger.info("Step 1: Calculating True Range")
+        self.true_range = RangeMetrics.true_range(self.df)
+        self.df['true_range'] = self.true_range
+        n = len(self.true_range)
+        mean_val = float(self.true_range.mean())
+        max_val = float(self.true_range.max())
+        zero_count = int((self.true_range == 0).sum())
+        self.logger.metric("True Range observations", f"{n:,}")
+        self.logger.metric("Mean TR", f"{mean_val:.6f}")
+        self.logger.metric("Max TR", f"{max_val:.6f}")
+        if zero_count > 0:
+            self.logger.info(f"  Zero-range candles: {zero_count}")
+        self.result.artifacts['true_range'] = self.df[['timestamp', 'true_range']].copy()
+        self.logger.success("True Range calculation complete")
+        return {
+            "true_range_status": "complete",
+            "true_range_observations": n,
+            "mean_true_range": mean_val,
+            "max_true_range": max_val,
+            "zero_range_count": zero_count,
+        }
+    
+    # ---- Step 2: ATR ----
+    def _calculate_atr(self) -> Dict[str, Any]:
+        self.logger.info("Step 2: Calculating ATR")
+        self.atr = RangeMetrics.atr(self.df, ATR_WINDOW)
+        self.df['atr'] = self.atr
+        n = len(self.atr)
+        warmup = int(self.atr.isna().sum())
+        valid = int(self.atr.notna().sum())
+        valid_series = self.atr.dropna()
+        mean_val = float(valid_series.mean()) if valid > 0 else 0.0
+        max_val = float(valid_series.max()) if valid > 0 else 0.0
+        self.logger.metric("ATR warm-up NaN", f"{warmup}")
+        self.logger.metric("Valid ATR", f"{valid:,}")
+        self.logger.metric("Mean ATR", f"{mean_val:.6f}")
+        self.logger.metric("Max ATR", f"{max_val:.6f}")
+        self.result.artifacts['atr'] = self.df[['timestamp', 'true_range', 'atr']].copy()
+        self.logger.success("ATR calculation complete")
+        return {
+            "atr_status": "complete",
+            "atr_window": ATR_WINDOW,
+            "atr_observations": n,
+            "atr_warmup_nan": warmup,
+            "valid_atr": valid,
+            "mean_atr": mean_val,
+            "max_atr": max_val,
+        }
+    
+    # ---- Step 3: Range Ratio ----
+    def _calculate_range_ratio(self) -> Dict[str, Any]:
+        self.logger.info("Step 3: Calculating Range Ratio")
+        self.range_ratio = RangeMetrics.range_ratio(self.df, ATR_WINDOW)
+        self.df['range_ratio'] = self.range_ratio
+        n = len(self.range_ratio)
+        warmup = int(self.range_ratio.isna().sum())
+        valid = int(self.range_ratio.notna().sum())
+        valid_series = self.range_ratio.dropna()
+        mean_val = float(valid_series.mean()) if valid > 0 else 0.0
+        max_val = float(valid_series.max()) if valid > 0 else 0.0
+        self.logger.metric("Ratio warm-up NaN", f"{warmup}")
+        self.logger.metric("Valid ratios", f"{valid:,}")
+        self.logger.metric("Mean ratio", f"{mean_val:.4f}")
+        self.logger.metric("Max ratio", f"{max_val:.4f}")
+        self.result.artifacts['range_ratio'] = self.df[['timestamp', 'true_range', 'atr', 'range_ratio']].copy()
+        self.logger.success("Range Ratio calculation complete")
+        return {
+            "range_ratio_status": "complete",
+            "ratio_observations": n,
+            "ratio_warmup_nan": warmup,
+            "valid_ratio": valid,
+            "mean_ratio": mean_val,
+            "max_ratio": max_val,
+        }
+    
+    # ---- Step 4: Percentiles ----
+    def _calculate_percentiles(self) -> Dict[str, Any]:
+        self.logger.info("Step 4: Calculating Rolling Percentiles")
+        if self.range_ratio is None:
+            raise RuntimeError("Range ratio required")
+        self.range_percentile = RangeMetrics.rolling_percentile(self.range_ratio, PERCENTILE_WINDOW)
+        self.df['range_percentile'] = self.range_percentile
+        n = len(self.range_percentile)
+        warmup = int(self.range_percentile.isna().sum())
+        valid = int(self.range_percentile.notna().sum())
+        valid_series = self.range_percentile.dropna()
+        mean_val = float(valid_series.mean()) if valid > 0 else 0.0
+        self.logger.metric("Percentile warm-up NaN", f"{warmup}")
+        self.logger.metric("Valid percentiles", f"{valid:,}")
+        self.logger.metric("Mean percentile", f"{mean_val:.2f}")
+        self.result.artifacts['range_percentile'] = self.df[['timestamp', 'true_range', 'atr', 'range_ratio', 'range_percentile']].copy()
+        self.logger.success("Percentile calculation complete")
+        return {
+            "percentiles_status": "complete",
+            "percentile_window": PERCENTILE_WINDOW,
+            "percentile_observations": n,
+            "percentile_warmup_nan": warmup,
+            "valid_percentiles": valid,
+            "mean_percentile": mean_val,
+        }
+    
+    # ---- Step 5: States ----
+    def _assign_states(self) -> Dict[str, Any]:
+        self.logger.info("Step 5: Assigning volatility states")
+        if self.range_percentile is None:
+            raise RuntimeError("Percentiles required")
+        self.state = classify_states(self.range_percentile, LOW_PERCENTILE, HIGH_PERCENTILE, EXTREME_PERCENTILE)
+        self.df['state_id'] = self.state
+        self.df['state_name'] = self.state.apply(state_code_to_label)
+        n = len(self.state)
+        counts = {
+            STATE_UNKNOWN: int((self.state == STATE_UNKNOWN).sum()),
+            STATE_COMPRESSION: int((self.state == STATE_COMPRESSION).sum()),
+            STATE_NORMAL: int((self.state == STATE_NORMAL).sum()),
+            STATE_EXPANSION: int((self.state == STATE_EXPANSION).sum()),
+            STATE_EXTREME: int((self.state == STATE_EXTREME).sum()),
+        }
+        valid_total = n - counts[STATE_UNKNOWN]
+        state_names = {
+            STATE_COMPRESSION: "Compression",
+            STATE_NORMAL: "Normal",
+            STATE_EXPANSION: "Expansion",
+            STATE_EXTREME: "Extreme",
+        }
+        for code, name in state_names.items():
+            c = counts[code]
+            pct = c / valid_total * 100 if valid_total > 0 else 0
+            self.logger.metric(f"  {name}", f"{c:>8,} ({pct:5.1f}%)")
+        self.result.artifacts['expansion_states'] = self.df[['timestamp', 'range_percentile', 'state_id', 'state_name']].copy()
+        self.logger.success("State assignment complete")
+        return {
+            "states_status": "complete",
+            "state_observations": n,
+            "unknown_count": counts[STATE_UNKNOWN],
+            "compression_count": counts[STATE_COMPRESSION],
+            "normal_count": counts[STATE_NORMAL],
+            "expansion_count": counts[STATE_EXPANSION],
+            "extreme_count": counts[STATE_EXTREME],
+        }
+    
+    # ---- Step 6: Segments ----
+    def _detect_segments(self) -> Dict[str, Any]:
+        self.logger.info("Step 6: Detecting volatility segments")
+        if self.state is None:
+            raise RuntimeError("States required")
+        self.segments = detect_segments(self.state, self.df['state_name'])
+        n_seg = len(self.segments)
+        if n_seg > 0:
+            self.logger.metric("Segment count", f"{n_seg:,}")
+            self.logger.metric("Largest segment", f"{self.segments['duration_bars'].max():,} bars")
+            self.logger.metric("Mean length", f"{self.segments['duration_bars'].mean():.1f} bars")
+        self.result.artifacts['segments'] = self.segments.copy()
+        self.logger.success("Segment detection complete")
+        return {
+            "segments_status": "complete",
+            "segment_count": n_seg,
+            "largest_segment": int(self.segments['duration_bars'].max()) if n_seg > 0 else 0,
+            "mean_segment_length": float(self.segments['duration_bars'].mean()) if n_seg > 0 else 0,
+        }
+    
+    # ---- Step 7: Statistics ----
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Compute behavioral statistics from volatility segments."""
+        self.logger.info("Step 7: Computing behavioral statistics")
+        if self.segments is None or len(self.segments) == 0:
+            raise RuntimeError("Segments required")
+        
+        overall = SegmentStatistics.overall_statistics(self.segments)
+        self.logger.info(f"\n  Overall: {overall['total_segments']:,} segments, "
+                        f"{overall['total_bars']:,} bars, "
+                        f"avg={overall['avg_segment_length']}, "
+                        f"max={overall['max_segment_length']:,}")
+        
+        dur_stats = SegmentStatistics.duration_statistics(self.segments)
+        self.result.artifacts['behavior_statistics'] = dur_stats
+        
+        occupancy = SegmentStatistics.occupancy_statistics(self.segments)
+        self.result.artifacts['occupancy_statistics'] = occupancy
+        
+        counts, probs = SegmentStatistics.transition_matrix(self.segments)
+        self.result.artifacts['transition_counts'] = counts
+        self.result.artifacts['transition_probabilities'] = probs
+        
+        persistence = SegmentStatistics.persistence_statistics(self.segments)
+        self.result.artifacts['persistence_statistics'] = persistence
+        
+        dist = SegmentStatistics.duration_distribution(self.segments)
+        self.result.artifacts['duration_distribution'] = dist
+        
+        self.logger.success("Behavioral statistics complete")
+        
+        return {
+            "statistics_status": "complete",
+            "total_bars": overall['total_bars'],
+            "total_segments": overall['total_segments'],
+            "avg_segment_length": overall['avg_segment_length'],
+            "median_segment_length": overall['median_segment_length'],
+            "max_segment_length": overall['max_segment_length'],
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        self.logger.section("Executing Pipeline (Phase 1.6 - FINAL)")
+        self.logger.info("All 7 steps implemented")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 013 complete - All 7 pipeline steps finished")
+        return results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df: pd.DataFrame, dataset_id: str = "in_memory",
+                      output_dir: Optional[str] = None):
+        return super().run_dataframe(df, dataset_id, output_dir)

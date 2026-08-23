@@ -1,0 +1,358 @@
+# atlas/modules/module010_volatility_persistence/module.py
+"""
+Module 010: Volatility Persistence Analysis
+
+PHASE 3.4 (FINAL): All 7 pipeline steps implemented.
+
+Pipeline:
+  returns → volatility → percentiles → states → segments → statistics → transitions
+
+Design:
+  Full rolling window required for percentiles.
+  State boundaries: <25=Low, 25-75=Normal, 75-95=High, ≥95=Extreme.
+  Segment detection: Run-length encoding.
+  Statistics: All 4 states always included.
+  Transitions: Adjacent-segment pairs measuring conditional next-state probabilities.
+  
+Terminology:
+  "Self-transitions" (Low→Low, etc.) are structurally impossible
+  because adjacent segments always have different states.
+  The transition matrix measures exit behavior: given a regime ends,
+  which regime follows?
+"""
+
+from typing import Dict, Any, Optional, List
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .config import (
+    MODULE_ID, MODULE_NAME, MODULE_VERSION,
+    WINDOW, RETURN_TYPE, VOLATILITY_METHOD,
+    PERCENTILE_METHOD, PERCENTILE_WINDOW,
+    PERCENTILE_LEVELS, MIN_SEGMENT_LENGTH,
+    REGIME_LABELS, TRANSITION_LOOKAHEAD
+)
+from .protocol import PROTOCOL
+from .validation import (
+    compute_log_returns, validate_return_series, validate_price_series
+)
+from .validation_volatility import (
+    compute_rolling_volatility, validate_volatility_series
+)
+from .validation_percentiles import (
+    compute_rolling_percentile, validate_percentile_series
+)
+from .validation_states import (
+    assign_states_from_percentiles, validate_state_series
+)
+from .validation_segments import (
+    detect_segments, validate_segments
+)
+from .validation_statistics import (
+    compute_persistence_statistics, validate_persistence_statistics
+)
+from .validation_transitions import (
+    compute_transition_matrix, validate_transition_matrix
+)
+
+MODULE_INFO = {
+    "id": MODULE_ID, "name": MODULE_NAME, "version": MODULE_VERSION,
+    "author": "Project Atlas",
+    "phase": "Phase 3.4 (FINAL) - All steps implemented",
+    "requires": ["000"],
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": [
+        "log_returns", "realized_volatility", "volatility_percentiles",
+        "volatility_states", "regime_segments", "persistence_statistics",
+        "transition_matrix"
+    ],
+    "status": "Research Complete - 7/7 steps implemented",
+    "transition_note": "Self-transitions structurally impossible. Matrix measures exit behavior.",
+}
+
+
+class VolatilityPersistenceResearch(BaseResearchModule):
+    """Module 010: Volatility Persistence Analysis - Phase 3.4 (FINAL)"""
+    
+    PROTOCOL = PROTOCOL
+    MODULE_INFO = MODULE_INFO
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(module_name=MODULE_NAME, module_version=MODULE_VERSION)
+        self.registry = registry or AtlasRegistry()
+        existing = self.registry.get_module(MODULE_ID)
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        self.returns: Optional[pd.Series] = None
+        self.volatility: Optional[pd.Series] = None
+        self.percentiles: Optional[pd.Series] = None
+        self.states: Optional[pd.Series] = None
+        self.segments: Optional[pd.DataFrame] = None
+        self.persistence_statistics: Optional[pd.DataFrame] = None
+        self.transition_counts: Optional[pd.DataFrame] = None
+        self.transition_probabilities: Optional[pd.DataFrame] = None
+        self.transitions: Optional[pd.DataFrame] = None
+    
+    def _register_pipeline_steps(self):
+        self.pipeline_steps = [
+            ("returns", self._calculate_returns),
+            ("volatility", self._calculate_volatility),
+            ("percentiles", self._calculate_percentiles),
+            ("states", self._assign_states),
+            ("segments", self._detect_segments),
+            ("statistics", self._compute_statistics),
+            ("transitions", self._compute_transition_matrix),
+        ]
+    
+    def get_config_snapshot(self) -> Dict[str, Any]:
+        return {
+            "module_name": self.module_name, "module_version": self.module_version,
+            "return_type": RETURN_TYPE, "window": WINDOW,
+            "volatility_method": VOLATILITY_METHOD, "volatility_ddof": 1,
+            "percentile_method": PERCENTILE_METHOD, "percentile_window": PERCENTILE_WINDOW,
+            "percentile_levels": PERCENTILE_LEVELS, "min_segment_length": MIN_SEGMENT_LENGTH,
+            "regime_labels": REGIME_LABELS, "transition_lookahead": TRANSITION_LOOKAHEAD,
+        }
+    
+    def get_protocol_snapshot(self) -> Dict[str, Any]:
+        return {
+            "question": PROTOCOL.question, "hypothesis": PROTOCOL.hypothesis,
+            "methodology": PROTOCOL.methodology, "depends_on": PROTOCOL.depends_on,
+        }
+    
+    def _validate_step(self, step_name: str) -> List[str]:
+        warnings = []
+        if step_name == "returns" and self.returns is not None:
+            is_valid, w = validate_return_series(self.returns, len(self.df), RETURN_TYPE)
+            warnings.extend(w)
+            if not is_valid: self.logger.error("Return validation FAILED")
+        elif step_name == "volatility" and self.volatility is not None:
+            is_valid, w = validate_volatility_series(self.volatility, len(self.returns), WINDOW)
+            warnings.extend(w)
+            if not is_valid: self.logger.error("Volatility validation FAILED")
+        elif step_name == "percentiles" and self.percentiles is not None:
+            is_valid, w = validate_percentile_series(self.percentiles, len(self.volatility), PERCENTILE_WINDOW)
+            warnings.extend(w)
+            if not is_valid: self.logger.error("Percentile validation FAILED")
+        elif step_name == "states" and self.states is not None:
+            is_valid, w = validate_state_series(self.states, self.percentiles, REGIME_LABELS, PERCENTILE_LEVELS)
+            warnings.extend(w)
+            if not is_valid: self.logger.error("State validation FAILED")
+        elif step_name == "segments" and self.segments is not None:
+            vs = int(self.states.notna().sum()) if self.states is not None else 0
+            is_valid, w = validate_segments(self.segments, self.states, vs)
+            warnings.extend(w)
+            if not is_valid: self.logger.error("Segment validation FAILED")
+        elif step_name == "statistics" and self.persistence_statistics is not None:
+            is_valid, w = validate_persistence_statistics(
+                self.persistence_statistics, self.segments, REGIME_LABELS
+            )
+            warnings.extend(w)
+            if not is_valid: self.logger.error("Statistics validation FAILED")
+        elif step_name == "transitions" and self.transition_counts is not None:
+            n_trans = max(0, len(self.segments) - 1) if self.segments is not None else 0
+            is_valid, w = validate_transition_matrix(
+                self.transition_counts, self.transition_probabilities,
+                self.segments, REGIME_LABELS, n_trans
+            )
+            warnings.extend(w)
+            if not is_valid: self.logger.error("Transition validation FAILED")
+        return warnings
+    
+    # ---- Step 1: Returns ----
+    def _calculate_returns(self) -> Dict[str, Any]:
+        self.logger.info("Step 1: Calculating canonical log returns")
+        close_prices = self.df['close']
+        is_valid, pw = validate_price_series(close_prices)
+        if not is_valid: raise ValueError(f"Invalid prices: {'; '.join(pw)}")
+        self.returns = compute_log_returns(close_prices)
+        self.df['log_return'] = self.returns
+        tp, tr = len(close_prices), len(self.returns)
+        rw, vr = int(self.returns.isna().sum()), int(self.returns.notna().sum())
+        vs = self.returns.dropna()
+        self.logger.metric("Return warm-up NaN", f"{rw}")
+        self.logger.metric("Valid returns", f"{vr:,}")
+        if vr > 0: self.logger.metric("Mean return", f"{vs.mean():.8f}")
+        self.result.artifacts['returns'] = self.df[['timestamp', 'close', 'log_return']].copy()
+        self.logger.success("Return calculation complete")
+        return {"returns_status": "complete", "return_type": "log",
+                "price_observations": tp, "return_observations": tr,
+                "return_warmup_nan": rw, "valid_returns": vr,
+                "return_mean": float(vs.mean()) if vr > 0 else None,
+                "return_std": float(vs.std()) if vr > 0 else None}
+    
+    # ---- Step 2: Volatility ----
+    def _calculate_volatility(self) -> Dict[str, Any]:
+        self.logger.info("Step 2: Calculating rolling volatility")
+        if self.returns is None: raise RuntimeError("Returns required")
+        self.volatility = compute_rolling_volatility(self.returns, WINDOW)
+        self.df['realized_volatility'] = self.volatility
+        tv, vw = len(self.volatility), int(self.volatility.isna().sum())
+        vv, vs = int(self.volatility.notna().sum()), self.volatility.dropna()
+        self.logger.metric("Volatility warm-up NaN", f"{vw}")
+        self.logger.metric("Valid volatility", f"{vv:,}")
+        if vv > 0: self.logger.metric("Mean volatility", f"{vs.mean():.8f}")
+        self.result.artifacts['volatility'] = self.df[['timestamp', 'log_return', 'realized_volatility']].copy()
+        self.logger.success("Volatility calculation complete")
+        return {"volatility_status": "complete", "volatility_method": "rolling_std",
+                "volatility_ddof": 1, "volatility_window": WINDOW,
+                "volatility_observations": tv, "volatility_warmup_nan": vw,
+                "valid_volatility": vv,
+                "volatility_mean": float(vs.mean()) if vv > 0 else None,
+                "volatility_std": float(vs.std()) if vv > 0 else None}
+    
+    # ---- Step 3: Percentiles ----
+    def _calculate_percentiles(self) -> Dict[str, Any]:
+        self.logger.info("Step 3: Calculating rolling percentile")
+        if self.volatility is None: raise RuntimeError("Volatility required")
+        self.percentiles = compute_rolling_percentile(self.volatility, PERCENTILE_WINDOW)
+        self.df['volatility_percentile'] = self.percentiles
+        tp, pw = len(self.percentiles), int(self.percentiles.isna().sum())
+        vp, vs = int(self.percentiles.notna().sum()), self.percentiles.dropna()
+        self.logger.metric("Percentile warm-up NaN", f"{pw}")
+        self.logger.metric("Valid percentiles", f"{vp:,}")
+        if vp > 0: self.logger.metric("Mean percentile", f"{vs.mean():.2f}")
+        self.result.artifacts['percentiles'] = self.df[['timestamp', 'realized_volatility', 'volatility_percentile']].copy()
+        self.logger.success("Percentile calculation complete")
+        return {"percentiles_status": "complete", "percentile_method": PERCENTILE_METHOD,
+                "percentile_window": PERCENTILE_WINDOW, "percentile_observations": tp,
+                "percentile_warmup_nan": pw, "valid_percentiles": vp,
+                "percentile_mean": float(vs.mean()) if vp > 0 else None}
+    
+    # ---- Step 4: States ----
+    def _assign_states(self) -> Dict[str, Any]:
+        self.logger.info("Step 4: Assigning volatility states")
+        if self.percentiles is None: raise RuntimeError("Percentiles required")
+        self.states = assign_states_from_percentiles(self.percentiles, PERCENTILE_LEVELS, REGIME_LABELS)
+        self.df['volatility_state'] = self.states
+        ts, sn = len(self.states), int(self.states.isna().sum())
+        vs_count, v_series = int(self.states.notna().sum()), self.states.dropna()
+        state_counts = {}
+        if len(v_series) > 0:
+            for label in REGIME_LABELS:
+                c = int(v_series.value_counts().get(label, 0))
+                state_counts[f"state_count_{label.lower()}"] = c
+                self.logger.metric(f"  {label}", f"{c:>8,}")
+        self.logger.metric("State warm-up NaN", f"{sn}")
+        self.logger.metric("Valid states", f"{vs_count:,}")
+        self.result.artifacts['states'] = self.df[['timestamp', 'volatility_percentile', 'volatility_state']].copy()
+        self.logger.success("State assignment complete")
+        return {"states_status": "complete", "state_method": "percentile_thresholds",
+                "state_thresholds": PERCENTILE_LEVELS, "state_labels": REGIME_LABELS,
+                "state_observations": ts, "state_warmup_nan": sn, "valid_states": vs_count,
+                **state_counts}
+    
+    # ---- Step 5: Segments ----
+    def _detect_segments(self) -> Dict[str, Any]:
+        self.logger.info("Step 5: Detecting regime segments")
+        if self.states is None: raise RuntimeError("States required")
+        self.segments = detect_segments(self.states)
+        self.df['segment_id'] = np.nan
+        for _, seg in self.segments.iterrows():
+            self.df.loc[seg['start_index']:seg['end_index'], 'segment_id'] = seg['segment_id']
+        vs_count, n_seg = int(self.states.notna().sum()), len(self.segments)
+        self.logger.metric("Segment count", f"{n_seg:,}")
+        if n_seg > 0:
+            self.logger.metric("Longest segment", f"{self.segments['duration_bars'].max()}")
+        export_cols = ['segment_id', 'state', 'state_code', 'start_timestamp', 'end_timestamp', 'duration_bars']
+        self.result.artifacts['segments'] = self.segments[[c for c in export_cols if c in self.segments.columns]].copy()
+        self.logger.success("Segment detection complete")
+        return {"segments_status": "complete", "segment_method": "run_length_encoding",
+                "segment_count": n_seg,
+                "longest_segment": int(self.segments['duration_bars'].max()) if n_seg > 0 else 0,
+                "mean_segment_length": float(self.segments['duration_bars'].mean()) if n_seg > 0 else 0,
+                "median_segment_length": float(self.segments['duration_bars'].median()) if n_seg > 0 else 0,
+                "valid_states_covered": vs_count}
+    
+    # ---- Step 6: Statistics ----
+    def _compute_statistics(self) -> Dict[str, Any]:
+        self.logger.info("Step 6: Computing persistence statistics")
+        if self.segments is None: raise RuntimeError("Segments required")
+        self.persistence_statistics = compute_persistence_statistics(self.segments, REGIME_LABELS)
+        self.result.artifacts['persistence_statistics'] = self.persistence_statistics.copy()
+        n_seg, total_bars = len(self.segments), int(self.segments['duration_bars'].sum()) if len(self.segments) > 0 else 0
+        self.logger.info("\n  Persistence Statistics:")
+        self.logger.info(f"  {'State':<10} {'Count':>8} {'Mean':>8} {'Median':>8} {'Max':>6} {'P95':>8} {'P99':>8}")
+        for _, row in self.persistence_statistics.iterrows():
+            if row['segment_count'] > 0:
+                self.logger.info(f"  {row['state']:<10} {int(row['segment_count']):>8} {row['mean_duration']:>8.1f} {row['median_duration']:>8.0f} {int(row['max_duration']):>6} {row['p95_duration']:>8.0f} {row['p99_duration']:>8.0f}")
+            else:
+                self.logger.info(f"  {row['state']:<10} {0:>8} {'─':>8} {'─':>8} {'─':>6} {'─':>8} {'─':>8}")
+        self.logger.success("Persistence statistics complete")
+        return {"statistics_status": "complete", "statistics_method": "groupby_state",
+                "states_analyzed": len(REGIME_LABELS), "total_segments": n_seg, "total_bars": total_bars}
+    
+    # ---- Step 7: Transitions ----
+    def _compute_transition_matrix(self) -> Dict[str, Any]:
+        """
+        Compute conditional next-state probability matrix.
+        
+        Measures: Given a volatility regime ends, which regime follows?
+        
+        Note: Self-transitions (Low→Low, etc.) are structurally impossible
+        because adjacent segments always have different states by definition.
+        The diagonal of this matrix will always be zero.
+        
+        Persistence is measured by segment durations (Phase 3.3),
+        not by self-transition probabilities.
+        """
+        self.logger.info("Step 7: Computing exit transition matrix")
+        self.logger.info("  Method: Adjacent-segment pairs")
+        self.logger.info("  Note: Self-transitions structurally impossible (diagonal = 0)")
+        if self.segments is None: raise RuntimeError("Segments required")
+        self.transition_counts, self.transition_probabilities, self.transitions = \
+            compute_transition_matrix(self.segments, REGIME_LABELS)
+        self.result.artifacts['transition_counts'] = self.transition_counts.copy()
+        self.result.artifacts['transition_probabilities'] = self.transition_probabilities.copy()
+        self.result.artifacts['transition_list'] = self.transitions.copy()
+        n_trans = len(self.transitions)
+        self.logger.info(f"\n  Exit Transition Count Matrix:")
+        self.logger.info(f"  {'FROM':<10} " + " ".join(f"{s:>8}" for s in REGIME_LABELS))
+        for from_s in REGIME_LABELS:
+            row_str = " ".join(f"{int(self.transition_counts.loc[from_s, to_s]):>8}" for to_s in REGIME_LABELS)
+            self.logger.info(f"  {from_s:<10} {row_str}")
+        self.logger.info(f"\n  Conditional Next-State Probability Matrix:")
+        self.logger.info(f"  {'FROM':<10} " + " ".join(f"{s:>8}" for s in REGIME_LABELS))
+        for from_s in REGIME_LABELS:
+            row_total = self.transition_counts.loc[from_s].sum()
+            if row_total > 0:
+                row_str = " ".join(f"{self.transition_probabilities.loc[from_s, to_s]:>8.3f}" for to_s in REGIME_LABELS)
+            else:
+                row_str = " ".join(f"{'─':>8}" for _ in REGIME_LABELS)
+            self.logger.info(f"  {from_s:<10} {row_str}")
+        if n_trans > 0:
+            max_idx = self.transition_counts.stack().idxmax()
+            self.logger.metric("Most common exit", f"{max_idx[0]}→{max_idx[1]} ({int(self.transition_counts.loc[max_idx[0], max_idx[1]])})")
+            min_mask = self.transition_counts.stack()
+            min_mask = min_mask[min_mask > 0]
+            if len(min_mask) > 0:
+                min_idx = min_mask.idxmin()
+                self.logger.metric("Least common exit", f"{min_idx[0]}→{min_idx[1]} ({int(self.transition_counts.loc[min_idx[0], min_idx[1]])})")
+        self.logger.metric("Total transitions", f"{n_trans:,}")
+        self.logger.success("Exit transition matrix complete")
+        return {
+            "transitions_status": "complete",
+            "transition_method": "adjacent_segments",
+            "transition_count": n_trans,
+            "transition_matrix_size": f"({len(REGIME_LABELS)},{len(REGIME_LABELS)})",
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        self.logger.section("Executing Pipeline (Phase 3.4 - FINAL)")
+        self.logger.info("All 7 steps implemented")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 010 complete - All 7 pipeline steps finished")
+        return results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df: pd.DataFrame, dataset_id: str = "in_memory",
+                      output_dir: Optional[str] = None):
+        return super().run_dataframe(df, dataset_id, output_dir)

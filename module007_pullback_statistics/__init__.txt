@@ -1,0 +1,6 @@
+# atlas/modules/module007_pullback_statistics/__init__.py
+"""
+Module 007: Pullback Statistics
+Analyzes pullback behaviour after established trends.
+Consumes Module 005 trend segments as input.
+"""

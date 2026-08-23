@@ -1,0 +1,126 @@
+# atlas/modules/module018_gap_behaviour/test_module.py
+"""
+Module 018 Validation
+Real BTC Dataset Validation
+"""
+
+from pathlib import Path
+
+from atlas.modules.module018_gap_behaviour.module import (
+    GapBehaviourResearch,
+)
+
+
+DATASETS = {
+
+    "BTC_15m": Path(
+        "data/raw/BTCUSD_15m.csv"
+    ),
+
+    "BTC_1h": Path(
+        "data/raw/BTCUSD_1h.csv"
+    ),
+
+    "BTC_4h": Path(
+        "data/raw/BTCUSD_4h.csv"
+    ),
+
+}
+
+
+def validate_dataset(name, path):
+
+    print()
+    print("=" * 70)
+    print(name)
+    print("=" * 70)
+
+    module = GapBehaviourResearch()
+
+    result = module.run(
+        filepath=str(path),
+        output_dir=f"outputs/module018/{name}",
+    )
+
+    assert result.status == "completed"
+
+    stats = result.statistics
+
+    print()
+
+    print("Gap Count :", stats["gap_count"])
+
+    print("Gap Up    :", stats["gap_up_count"])
+
+    print("Gap Down  :", stats["gap_down_count"])
+
+    print("Mean Gap  :", round(stats["mean_gap"], 4))
+
+    print("Std Gap   :", round(stats["std_gap"], 4))
+
+    print()
+
+    print("✓ Validation Passed")
+
+    return result
+
+
+def main():
+
+    print()
+    print("=" * 80)
+    print("PROJECT ATLAS")
+    print("MODULE 018 VALIDATION")
+    print("=" * 80)
+
+    results = {}
+
+    for name, path in DATASETS.items():
+
+        results[name] = validate_dataset(
+            name,
+            path,
+        )
+
+    print()
+    print("=" * 80)
+    print("CROSS DATASET SUMMARY")
+    print("=" * 80)
+
+    for name, result in results.items():
+
+        s = result.statistics
+
+        print()
+
+        print(name)
+
+        print(
+            f"Gap Count : {s['gap_count']:,}"
+        )
+
+        print(
+            f"Frequency : {s['gap_frequency']:.4%}"
+        )
+
+        print(
+            f"Mean Gap  : {s['mean_gap']:.4f}"
+        )
+
+        print(
+            f"Gap Up    : {s['gap_up_count']}"
+        )
+
+        print(
+            f"Gap Down  : {s['gap_down_count']}"
+        )
+
+    print()
+    print("=" * 80)
+    print("✓ MODULE 018 PRODUCTION VALIDATION COMPLETE")
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+
+    main()

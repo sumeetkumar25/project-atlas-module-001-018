@@ -1,0 +1,31 @@
+# atlas/modules/module004_stationarity/config.py
+"""
+Module 004 Configuration
+Stationarity Analysis - Phase 1
+"""
+
+# Rolling windows for mean and variance analysis
+ROLLING_WINDOWS = [50, 100, 250, 500]
+
+# Significance levels for stationarity tests
+ADF_SIGNIFICANCE = 0.05
+KPSS_SIGNIFICANCE = 0.05
+
+# KPSS regression type
+# "c" = level stationary (constant around a mean)
+# "ct" = trend stationary (constant around a trend)
+KPSS_REGRESSION = "c"
+
+# ADF regression type
+# "c" = constant only
+# "ct" = constant and trend
+# "n" = no constant, no trend
+ADF_REGRESSION = "c"
+
+# Maximum lags for ADF test ("auto" = automatic selection via AIC)
+MAX_LAGS = "auto"
+
+# Module metadata
+MODULE_ID = "004"
+MODULE_NAME = "Stationarity Analysis"
+MODULE_VERSION = "0.1.0-phase1"

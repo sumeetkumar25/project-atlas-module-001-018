@@ -1,0 +1,5 @@
+# atlas/modules/module011_breakout_statistics/__init__.py
+"""
+Module 011: Breakout Statistics
+Measures market behavior after price breaks beyond recent trading ranges.
+"""

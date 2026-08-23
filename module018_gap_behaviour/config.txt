@@ -1,0 +1,25 @@
+# atlas/modules/module018_gap_behaviour/config.py
+"""
+Module 018 Configuration
+Gap Behaviour
+"""
+
+MODULE_ID = "018"
+
+MODULE_NAME = "Gap Behaviour"
+
+MODULE_VERSION = "1.0.0"
+
+# Gap classification
+
+SMALL_PERCENTILE = 33
+
+MEDIUM_PERCENTILE = 66
+
+# Export
+
+EXPORT_GAP_EVENTS = True
+
+EXPORT_GAP_STATISTICS = True
+
+EXPORT_DISTRIBUTION = True

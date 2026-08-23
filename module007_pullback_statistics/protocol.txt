@@ -1,0 +1,48 @@
+# atlas/modules/module007_pullback_statistics/protocol.py
+"""
+Research Protocol
+Module 007 - Pullback Statistics
+"""
+
+PROTOCOL = {
+    "module_id": "007",
+    "module_name": "Pullback Statistics",
+    "research_question": "How do pullbacks behave after an established trend?",
+    "null_hypothesis": "Pullbacks occur randomly with no stable statistical properties.",
+    "alternative_hypothesis": "Pullbacks exhibit stable statistical behaviour.",
+    "rationale": (
+        "Understanding pullback behaviour is essential for trend-following strategies. "
+        "If pullbacks have predictable depth and duration, entries can be optimized. "
+        "Module 007 builds on Module 005's trend segmentation to analyze what happens "
+        "after a trend ends - without redefining what a trend is."
+    ),
+    "methodology": (
+        "Phase 1: Pullback Detection and Measurement\n"
+        "1. Load trend segments from Module 005 output\n"
+        "2. For each trend, identify the first pullback after trend end\n"
+        "3. Measure pullback depth (%), duration (bars), and recovery\n"
+        "4. Compute summary statistics across all pullbacks\n"
+        "\n"
+        "Design principle: Module 007 does NOT redefine trends.\n"
+        "It consumes Module 005's output as ground truth."
+    ),
+    "phase": 1,
+    "inputs": [
+        "trend_segments (from Module 005)",
+        "OHLCV data"
+    ],
+    "outputs": [
+        "pullbacks",
+        "statistics",
+        "summary"
+    ],
+    "statistics": [
+        "pullback_count",
+        "mean_depth_pct",
+        "median_depth_pct",
+        "max_depth_pct",
+        "mean_duration",
+        "median_duration",
+        "recovery_rate"
+    ]
+}

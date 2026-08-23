@@ -1,0 +1,11 @@
+# atlas/modules/module018_gap_behaviour/__init__.py
+"""
+Module 018
+Gap Behaviour
+"""
+
+from .module import GapBehaviourResearch
+
+__all__ = [
+    "GapBehaviourResearch",
+]

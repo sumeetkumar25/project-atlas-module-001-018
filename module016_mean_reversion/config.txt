@@ -1,0 +1,24 @@
+# atlas/modules/module016_mean_reversion/config.py
+"""
+Module 016 Configuration
+Mean Reversion
+"""
+
+MODULE_ID = "016"
+MODULE_NAME = "Mean Reversion"
+MODULE_VERSION = "1.6.0"
+
+# Rolling equilibrium window
+LOOKBACK_WINDOW = 20
+
+# Rolling standard deviation window
+STD_WINDOW = LOOKBACK_WINDOW
+
+# Extreme threshold (z-score)
+Z_SCORE_THRESHOLD = 2.0
+
+# Maximum search window for reversion
+MAX_REVERSION_BARS = 50
+
+# Minimum deviation from equilibrium
+MIN_DEVIATION = 0.0

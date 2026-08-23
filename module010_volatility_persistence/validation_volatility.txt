@@ -1,0 +1,169 @@
+# atlas/modules/module010_volatility_persistence/validation_volatility.py
+"""
+Atlas Volatility Validator
+Permanent validation for rolling volatility calculations.
+
+Atlas Standard:
+  Method: rolling_std(ddof=1, min_periods=window)
+  Warm-up: `window` NaN values
+  Length: same as input returns series
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Tuple, List
+
+
+def validate_volatility_series(volatility: pd.Series,
+                                returns_length: int,
+                                window: int) -> Tuple[bool, List[str]]:
+    """Validate a calculated rolling volatility series."""
+    warnings = []
+    is_valid = True
+    
+    if not pd.api.types.is_numeric_dtype(volatility):
+        return False, ["Volatility series is not numeric dtype"]
+    
+    if len(volatility) != returns_length:
+        warnings.append(f"Length mismatch: expected {returns_length}, got {len(volatility)}")
+        is_valid = False
+    
+    expected_nan = window
+    actual_nan = int(volatility.isna().sum())
+    if actual_nan != expected_nan:
+        warnings.append(f"NaN mismatch: expected {expected_nan}, got {actual_nan}")
+        if abs(actual_nan - expected_nan) > 1:
+            is_valid = False
+    
+    if len(volatility) >= window and not volatility.iloc[:window].isna().all():
+        warnings.append(f"First {window} values should all be NaN")
+        is_valid = False
+    
+    if len(volatility) > window and pd.isna(volatility.iloc[window]):
+        warnings.append(f"First valid value at index {window} is NaN")
+        is_valid = False
+    
+    if np.isinf(volatility).any():
+        warnings.append(f"Found {int(np.isinf(volatility).sum())} infinite values")
+        is_valid = False
+    
+    valid = volatility.dropna()
+    if len(valid) > 0:
+        if (valid < 0).any():
+            warnings.append(f"Found {int((valid < 0).sum())} negative values")
+            is_valid = False
+        if not np.isfinite(valid).all():
+            warnings.append("Non-finite values found")
+            is_valid = False
+    
+    return is_valid, warnings
+
+
+def compute_rolling_volatility(returns: pd.Series, window: int = 20) -> pd.Series:
+    """Canonical Atlas rolling volatility: rolling_std(ddof=1, min_periods=window)"""
+    if window < 2:
+        raise ValueError(f"Window must be >= 2, got {window}")
+    if len(returns) < window + 1:
+        raise ValueError(f"Need at least {window + 1} returns, got {len(returns)}")
+    return returns.rolling(window=window, min_periods=window).std(ddof=1)
+
+
+def test_constant_returns():
+    n, w = 100, 20
+    returns = pd.Series([np.nan] + [0.0] * (n - 1))
+    vol = compute_rolling_volatility(returns, w)
+    assert len(vol) == n
+    assert vol.iloc[:w].isna().all()
+    assert not pd.isna(vol.iloc[w])
+    assert np.allclose(vol.dropna().values, 0.0, atol=1e-12)
+    return True
+
+def test_known_returns():
+    np.random.seed(42)
+    n, w = 50, 10
+    returns = pd.Series([np.nan] + list(np.random.normal(0, 0.01, n - 1)))
+    vol = compute_rolling_volatility(returns, w)
+    ref = returns.rolling(window=w, min_periods=w).std(ddof=1)
+    assert np.allclose(vol.dropna().values, ref.dropna().values, atol=1e-12)
+    return True
+
+def test_reference_validation():
+    np.random.seed(42)
+    n, w = 1000, 20
+    returns = pd.Series([np.nan] + list(np.random.normal(0, 0.01, n - 1)))
+    vol = compute_rolling_volatility(returns, w)
+    ref = returns.rolling(window=w, min_periods=w).std(ddof=1)
+    assert np.abs(vol.dropna() - ref.dropna()).max() < 1e-12
+    return True
+
+def test_warmup_nan_count():
+    np.random.seed(42)
+    for n, w in [(200, 10), (200, 20), (200, 50), (500, 100)]:
+        returns = pd.Series([np.nan] + list(np.random.normal(0, 0.01, n - 1)))
+        vol = compute_rolling_volatility(returns, w)
+        assert int(vol.isna().sum()) == w
+        assert vol.iloc[:w].isna().all()
+        if len(vol) > w:
+            assert not pd.isna(vol.iloc[w])
+    return True
+
+def test_no_negative_values():
+    np.random.seed(42)
+    returns = pd.Series([np.nan] + list(np.random.normal(0, 0.05, 1000)))
+    vol = compute_rolling_volatility(returns, 20)
+    assert (vol.dropna() >= 0).all()
+    return True
+
+def test_no_infinite_values():
+    np.random.seed(42)
+    returns = pd.Series([np.nan] + list(np.random.normal(0, 0.01, 1000)))
+    assert not np.isinf(compute_rolling_volatility(returns, 20)).any()
+    return True
+
+def test_length_preserved():
+    np.random.seed(42)
+    for n, w in [(50, 5), (100, 10), (200, 20), (500, 50)]:
+        returns = pd.Series([np.nan] + list(np.random.normal(0, 0.01, n - 1)))
+        assert len(compute_rolling_volatility(returns, w)) == n
+    return True
+
+def test_small_input():
+    try:
+        compute_rolling_volatility(pd.Series([np.nan, 0.01, 0.02]), 20)
+        assert False
+    except ValueError:
+        pass
+    return True
+
+
+def run_all_validation_tests():
+    print("\n" + "=" * 60)
+    print("ATLAS VOLATILITY VALIDATOR - UNIT TESTS")
+    print("=" * 60)
+    tests = [
+        ("Constant Returns -> Zero Vol", test_constant_returns),
+        ("Known Returns vs Manual", test_known_returns),
+        ("Reference Validation", test_reference_validation),
+        ("Warm-up = Window", test_warmup_nan_count),
+        ("No Negative Values", test_no_negative_values),
+        ("No Infinite Values", test_no_infinite_values),
+        ("Length Preserved", test_length_preserved),
+        ("Small Input Error", test_small_input),
+    ]
+    results = {}
+    for name, fn in tests:
+        try:
+            fn()
+            results[name] = True
+            print(f"  ✓ {name}")
+        except Exception as e:
+            results[name] = False
+            print(f"  ✗ {name}: {e}")
+    passed = sum(results.values())
+    print(f"\n  {passed}/{len(tests)} passed\n" + "=" * 60)
+    return passed == len(tests)
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(0 if run_all_validation_tests() else 1)

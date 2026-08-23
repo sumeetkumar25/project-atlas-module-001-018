@@ -1,0 +1,18 @@
+# atlas/modules/module012_swing_structure/config.py
+"""
+Module 012 Configuration
+Swing Structure Analysis
+"""
+
+MODULE_ID = "012"
+MODULE_NAME = "Swing Structure"
+MODULE_VERSION = "0.1.0-phase1"
+
+# Fractal swing detection strength (bars on each side)
+SWING_STRENGTH = 2
+
+# Minimum distance between consecutive swing points (bars)
+MIN_SWING_DISTANCE = 0
+
+# Swing confirmation requires future bars
+CONFIRMATION_LAG = SWING_STRENGTH

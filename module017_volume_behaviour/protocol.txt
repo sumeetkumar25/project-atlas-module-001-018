@@ -1,0 +1,160 @@
+# atlas/modules/module017_volume_behaviour/protocol.py
+"""
+Module 017 Research Protocol
+Volume Behaviour
+
+Science only. No code.
+"""
+
+from atlas.framework.protocol import (
+    ResearchProtocol,
+    ModuleCategory,
+)
+
+from .config import MODULE_VERSION
+
+
+PROTOCOL = ResearchProtocol(
+
+    module_id="017",
+
+    module_name="Volume Behaviour",
+
+    category=ModuleCategory.VOLUME_BEHAVIOR,
+
+    question=(
+
+        "How does Bitcoin trading volume "
+
+        "behave statistically "
+
+        "through time?"
+
+    ),
+
+    hypothesis=(
+
+        "Bitcoin volume forms "
+
+        "persistent statistical "
+
+        "regimes that can be "
+
+        "objectively measured."
+
+    ),
+
+    rationale=(
+
+        "Volume is one of the most "
+
+        "important market variables. "
+
+        "Understanding how long high "
+
+        "and low volume regimes last, "
+
+        "how often they transition, "
+
+        "and how persistent they are "
+
+        "provides behavioural knowledge "
+
+        "independent of price."
+
+    ),
+
+    methodology=(
+
+        "Volume cleaning\n"
+
+        "Rolling normalization\n"
+
+        "Rolling percentiles\n"
+
+        "Volume regime classification\n"
+
+        "Segment detection\n"
+
+        "Behaviour statistics\n"
+
+        "Export"
+
+    ),
+
+    statistics=[
+
+        "Mean normalized volume",
+
+        "Median normalized volume",
+
+        "Volume percentile distribution",
+
+        "Volume regime occupancy",
+
+        "Transition matrix",
+
+        "Persistence",
+
+        "Segment duration",
+
+        "Largest regime",
+
+        "Average regime length",
+
+    ],
+
+    depends_on=[],
+
+    required_datasets=[
+
+        "BTC_15m",
+
+        "BTC_1h",
+
+        "BTC_4h",
+
+    ],
+
+    author="Project Atlas",
+
+    version=MODULE_VERSION,
+
+    produces=[
+
+        "normalized_volume",
+
+        "volume_percentiles",
+
+        "volume_states",
+
+        "volume_segments",
+
+        "volume_statistics",
+
+    ],
+
+    limitations=[
+
+        "Uses rolling normalization.",
+
+        "Uses fixed percentile window.",
+
+        "Measures behaviour only.",
+
+        "Does not analyse price relationship.",
+
+    ],
+
+    future_research=[
+
+        "Volume-price interaction",
+
+        "Volume-volatility interaction",
+
+        "Volume clustering",
+
+        "Liquidity regime analysis",
+
+    ],
+)

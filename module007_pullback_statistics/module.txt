@@ -1,0 +1,406 @@
+# atlas/modules/module007_pullback_statistics/module.py
+"""
+Module 007: Pullback Statistics - Phase 1
+
+Analyzes pullback behaviour after trend segments identified by Module 005.
+
+REDESIGNED: Module receives trend segments directly via set_trend_segments().
+No filesystem dependency for synthetic testing.
+CSV loading is only a fallback for production use.
+
+Architecture:
+  Module 005 → trend_segments → set_trend_segments() → Module 007
+"""
+
+from typing import Dict, Any, Optional
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.protocol import ResearchProtocol, ModuleStatus, ModuleCategory
+from atlas.framework.registry import AtlasRegistry
+
+from .config import (
+    MODULE_ID,
+    MODULE_NAME,
+    MODULE_VERSION,
+    MIN_PULLBACK_BARS,
+    MAX_PULLBACK_BARS,
+    RECOVERY_BUFFER,
+    MODULE_005_OUTPUT
+)
+from .protocol import PROTOCOL
+
+MODULE_INFO = {
+    "id": MODULE_ID,
+    "name": MODULE_NAME,
+    "version": MODULE_VERSION,
+    "author": "Project Atlas",
+    "phase": "Phase 1 - Pullback Detection",
+    "requires": ["000", "001", "005"],
+    "depends_on_artifact": "Module 005 trend_segments (via set_trend_segments)",
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": [
+        "pullbacks",
+        "pullback_statistics"
+    ],
+    "note": "Receives trends in-memory. CSV loading is fallback only."
+}
+
+PULLBACK_COLUMNS = [
+    "trend_id",
+    "trend_direction",
+    "trend_start_idx",
+    "trend_end_idx",
+    "pullback_start_idx",
+    "pullback_end_idx",
+    "pullback_depth_pct",
+    "pullback_duration",
+    "pullback_start_price",
+    "pullback_end_price",
+    "trend_end_price",
+    "recovered",
+    "recovery_bars"
+]
+
+
+class PullbackResearch(BaseResearchModule):
+    """
+    Module 007: Pullback Statistics - Phase 1
+    
+    Analyzes what happens AFTER a trend ends.
+    Receives trend segments directly (in-memory) from Module 005.
+    
+    Primary API:
+        research.set_trend_segments(trend_df)  # Set trends
+        research.run_dataframe(price_df)        # Analyze pullbacks
+    
+    No disk I/O required for testing.
+    """
+    
+    PROTOCOL = ResearchProtocol(
+        module_id=MODULE_ID,
+        module_name=MODULE_NAME,
+        category=ModuleCategory.MICROSTRUCTURE,
+        question=PROTOCOL["research_question"],
+        hypothesis=PROTOCOL["null_hypothesis"],
+        rationale=PROTOCOL["rationale"],
+        methodology=PROTOCOL["methodology"],
+        statistics=PROTOCOL["statistics"],
+        depends_on=["000", "001", "005"],
+        required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+        author="Project Atlas",
+        version=MODULE_VERSION,
+        status=ModuleStatus.PLANNED,
+        produces=["pullbacks", "pullback_statistics"]
+    )
+    
+    MODULE_INFO = MODULE_INFO
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(
+            module_name=MODULE_NAME,
+            module_version=MODULE_VERSION
+        )
+        self.registry = registry or AtlasRegistry()
+        
+        existing = self.registry.get_module(MODULE_ID)
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        
+        # Trends are set externally via set_trend_segments()
+        self.trends: Optional[pd.DataFrame] = None
+        self.pullbacks: Optional[pd.DataFrame] = None
+        self.output_dir: Optional[str] = None
+    
+    # ============================================================
+    # Public API: Set trend segments
+    # ============================================================
+    
+    def set_trend_segments(self, trend_segments: pd.DataFrame) -> None:
+        """
+        Set trend segments from Module 005 (or any source).
+        
+        This is the PRIMARY way to provide trends to Module 007.
+        No filesystem dependency.
+        
+        Args:
+            trend_segments: DataFrame with Module 005 trend output
+                           Must contain: segment_id, direction, start_idx, end_idx
+        """
+        required_cols = ['segment_id', 'direction', 'start_idx', 'end_idx']
+        missing = [c for c in required_cols if c not in trend_segments.columns]
+        if missing:
+            raise ValueError(f"Trend segments missing required columns: {missing}")
+        
+        self.trends = trend_segments.copy()
+        self.logger.success(f"Received {len(self.trends)} trend segments in-memory")
+    
+    def _register_pipeline_steps(self):
+        """Register Phase 1 computation steps"""
+        self.pipeline_steps = [
+            ("load_trends", self._load_trends),
+            ("find_pullbacks", self._find_pullbacks),
+            ("compute_statistics", self._compute_statistics),
+        ]
+    
+    # ============================================================
+    # Step 1: Load trends (in-memory primary, CSV fallback)
+    # ============================================================
+    
+    def _load_trends(self) -> Dict[str, Any]:
+        """
+        Load trend segments.
+        
+        Priority:
+        1. Already set via set_trend_segments() (in-memory)
+        2. Generate from Module 005 on the same data
+        3. Load from CSV file (production fallback)
+        """
+        # Primary: Already have trends in memory
+        if self.trends is not None:
+            self.logger.info(f"Using supplied trend segments ({len(self.trends)} segments)")
+            return {"trends_loaded": len(self.trends), "trends_source": "in_memory"}
+        
+        # Fallback 1: Generate from Module 005
+        self.logger.info("No trends supplied - generating from Module 005")
+        
+        try:
+            from atlas.modules.module005_trend_persistence.module import TrendPersistenceResearch
+            
+            trend_module = TrendPersistenceResearch(registry=self.registry)
+            trend_module.MIN_TREND_LENGTH = 1
+            
+            trend_result = trend_module.run_dataframe(
+                self.df,
+                dataset_id="module007_auto_trends"
+            )
+            
+            if 'trend_segments' in trend_result.artifacts:
+                self.trends = trend_result.artifacts['trend_segments']
+                self.logger.success(f"Generated {len(self.trends)} trend segments from Module 005")
+                return {"trends_loaded": len(self.trends), "trends_source": "module005_generated"}
+            
+        except Exception as e:
+            self.logger.warning(f"Module 005 generation failed: {e}")
+        
+        # Fallback 2: CSV file (production)
+        if self.output_dir:
+            trend_path = Path(self.output_dir) / MODULE_005_OUTPUT
+            if trend_path.exists():
+                self.trends = pd.read_csv(trend_path)
+                self.logger.success(f"Loaded {len(self.trends)} trend segments from CSV")
+                return {"trends_loaded": len(self.trends), "trends_source": "csv"}
+        
+        self.logger.error("No trend segments available")
+        return {"trends_loaded": 0, "trends_source": "none"}
+    
+    # ============================================================
+    # Step 2: Find Pullbacks
+    # ============================================================
+    
+    def _find_pullbacks(self) -> Dict[str, Any]:
+        """
+        For each trend segment, find the first pullback after trend end.
+        
+        Uses whatever trends were provided (Module 005 or synthetic).
+        Does NOT redefine what a trend is.
+        """
+        self.logger.info("Detecting pullbacks after trend segments")
+        
+        if self.trends is None or len(self.trends) == 0:
+            self.logger.warning("No trend segments available")
+            self.pullbacks = pd.DataFrame(columns=PULLBACK_COLUMNS)
+            self.result.artifacts["pullbacks"] = self.pullbacks
+            return {"pullback_count": 0}
+        
+        close_prices = self.df['close'].values
+        n_bars = len(close_prices)
+        
+        pullbacks = []
+        
+        for _, trend in self.trends.iterrows():
+            trend_id = trend.get('segment_id', trend.get('trend_id', 0))
+            direction = trend['direction']
+            trend_end_idx = int(trend['end_idx'])
+            
+            # Skip if trend ends too close to data end
+            if trend_end_idx >= n_bars - MIN_PULLBACK_BARS:
+                continue
+            
+            trend_end_price = close_prices[trend_end_idx]
+            
+            # Search forward for pullback extreme
+            pullback_found = False
+            pullback_extreme_idx = trend_end_idx
+            pullback_extreme_price = trend_end_price
+            
+            search_end = min(trend_end_idx + MAX_PULLBACK_BARS, n_bars)
+            
+            for i in range(trend_end_idx + 1, search_end):
+                current_price = close_prices[i]
+                
+                if direction == 1:  # Uptrend: pullback = price decline
+                    if current_price < pullback_extreme_price:
+                        pullback_extreme_price = current_price
+                        pullback_extreme_idx = i
+                        pullback_found = True
+                else:  # Downtrend: pullback = price rally
+                    if current_price > pullback_extreme_price:
+                        pullback_extreme_price = current_price
+                        pullback_extreme_idx = i
+                        pullback_found = True
+            
+            if not pullback_found:
+                continue
+            
+            # Calculate depth
+            if direction == 1:
+                depth_pct = (trend_end_price - pullback_extreme_price) / trend_end_price * 100
+            else:
+                depth_pct = (pullback_extreme_price - trend_end_price) / trend_end_price * 100
+            
+            duration = pullback_extreme_idx - trend_end_idx
+            
+            # Check recovery
+            recovered = False
+            recovery_bars = 0
+            
+            if direction == 1:
+                recovery_target = trend_end_price * (1 + RECOVERY_BUFFER / 100)
+            else:
+                recovery_target = trend_end_price * (1 - RECOVERY_BUFFER / 100)
+            
+            for i in range(pullback_extreme_idx + 1, min(pullback_extreme_idx + MAX_PULLBACK_BARS, n_bars)):
+                if direction == 1:
+                    if close_prices[i] >= recovery_target:
+                        recovered = True
+                        recovery_bars = i - pullback_extreme_idx
+                        break
+                else:
+                    if close_prices[i] <= recovery_target:
+                        recovered = True
+                        recovery_bars = i - pullback_extreme_idx
+                        break
+            
+            pullbacks.append({
+                "trend_id": trend_id,
+                "trend_direction": "Up" if direction == 1 else "Down",
+                "trend_start_idx": int(trend.get('start_idx', 0)),
+                "trend_end_idx": trend_end_idx,
+                "pullback_start_idx": trend_end_idx,
+                "pullback_end_idx": pullback_extreme_idx,
+                "pullback_depth_pct": round(depth_pct, 4),
+                "pullback_duration": duration,
+                "pullback_start_price": float(trend_end_price),
+                "pullback_end_price": float(pullback_extreme_price),
+                "trend_end_price": float(trend_end_price),
+                "recovered": recovered,
+                "recovery_bars": recovery_bars if recovered else 0
+            })
+        
+        self.pullbacks = pd.DataFrame(pullbacks, columns=PULLBACK_COLUMNS)
+        self.result.artifacts["pullbacks"] = self.pullbacks
+        
+        n_pullbacks = len(self.pullbacks)
+        n_recovered = int(self.pullbacks['recovered'].sum()) if n_pullbacks > 0 else 0
+        
+        self.logger.metric("Pullbacks found", f"{n_pullbacks:,}")
+        if n_pullbacks > 0:
+            self.logger.metric("Recovery rate", f"{n_recovered/n_pullbacks*100:.1f}%")
+        
+        return {
+            "pullback_count": n_pullbacks,
+            "recovered_count": n_recovered
+        }
+    
+    # ============================================================
+    # Step 3: Compute Statistics
+    # ============================================================
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Compute summary statistics for pullbacks"""
+        self.logger.info("Computing pullback statistics")
+        
+        if self.pullbacks is None or len(self.pullbacks) == 0:
+            self.logger.warning("No pullbacks to analyze")
+            stats = {
+                "pullback_count": 0,
+                "mean_depth_pct": 0.0,
+                "median_depth_pct": 0.0,
+                "max_depth_pct": 0.0,
+                "mean_duration": 0.0,
+                "median_duration": 0.0,
+                "recovery_rate": 0.0
+            }
+            for key, value in stats.items():
+                self.result.statistics[key] = value
+            return stats
+        
+        pb = self.pullbacks
+        
+        stats = {
+            "pullback_count": len(pb),
+            "mean_depth_pct": float(pb["pullback_depth_pct"].mean()),
+            "median_depth_pct": float(pb["pullback_depth_pct"].median()),
+            "max_depth_pct": float(pb["pullback_depth_pct"].max()),
+            "min_depth_pct": float(pb["pullback_depth_pct"].min()),
+            "std_depth_pct": float(pb["pullback_depth_pct"].std()),
+            "mean_duration": float(pb["pullback_duration"].mean()),
+            "median_duration": float(pb["pullback_duration"].median()),
+            "max_duration": int(pb["pullback_duration"].max()),
+            "recovery_rate": float(pb["recovered"].mean()),
+        }
+        
+        # By direction
+        for direction in ["Up", "Down"]:
+            mask = pb["trend_direction"] == direction
+            subset = pb[mask]
+            if len(subset) > 0:
+                stats[f"{direction.lower()}_count"] = len(subset)
+                stats[f"{direction.lower()}_mean_depth"] = float(subset["pullback_depth_pct"].mean())
+                stats[f"{direction.lower()}_median_depth"] = float(subset["pullback_depth_pct"].median())
+                stats[f"{direction.lower()}_mean_duration"] = float(subset["pullback_duration"].mean())
+                stats[f"{direction.lower()}_recovery_rate"] = float(subset["recovered"].mean())
+        
+        # Percentiles
+        for pct in [25, 50, 75, 90, 95]:
+            stats[f"depth_p{pct}"] = float(np.percentile(pb["pullback_depth_pct"], pct))
+        
+        # Display
+        self.logger.info(f"\nPullback Statistics:")
+        self.logger.info(f"  Total: {stats['pullback_count']:,}")
+        self.logger.info(f"  Mean depth: {stats['mean_depth_pct']:.2f}%")
+        self.logger.info(f"  Median depth: {stats['median_depth_pct']:.2f}%")
+        self.logger.info(f"  Mean duration: {stats['mean_duration']:.1f} bars")
+        self.logger.info(f"  Recovery rate: {stats['recovery_rate']*100:.1f}%")
+        
+        for key, value in stats.items():
+            self.result.statistics[key] = value
+        
+        return stats
+    
+    # ============================================================
+    # Compute
+    # ============================================================
+    
+    def compute(self) -> Dict[str, Any]:
+        """Execute pipeline using shared execute_pipeline()"""
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Phase 1 complete: Pullback analysis finished")
+        return results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        """Execute research from file"""
+        self.output_dir = output_dir
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df: pd.DataFrame,
+                      dataset_id: str = "in_memory",
+                      output_dir: Optional[str] = None):
+        """Execute research from DataFrame"""
+        self.output_dir = output_dir
+        return super().run_dataframe(df, dataset_id, output_dir)

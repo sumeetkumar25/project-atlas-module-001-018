@@ -1,0 +1,59 @@
+# atlas/modules/module004_stationarity/protocol.py
+"""
+Module 004 Research Protocol
+Stationarity Analysis - Phase 1
+"""
+
+RESEARCH_PROTOCOL = {
+    "module_id": "004",
+    "module_name": "Stationarity Analysis",
+    "research_question": "Are BTC returns statistically stationary?",
+    "null_hypothesis": "Returns contain a unit root (non-stationary).",
+    "alternative_hypothesis": "Returns are stationary.",
+    "rationale": (
+        "Stationarity is a fundamental assumption in time series analysis. "
+        "Non-stationary data can produce spurious correlations and unreliable "
+        "statistical inference. Before any time series modeling, we must "
+        "confirm that BTC returns are stationary."
+    ),
+    "methodology": (
+        "Phase 1: Stationarity Tests\n"
+        "1. Calculate log returns from close prices\n"
+        "2. Augmented Dickey-Fuller (ADF) test\n"
+        "   - H0: Unit root present (non-stationary)\n"
+        "   - H1: No unit root (stationary)\n"
+        "   - Reject H0 if p-value < 0.05\n"
+        "3. KPSS test\n"
+        "   - H0: Series is stationary\n"
+        "   - H1: Unit root present (non-stationary)\n"
+        "   - Reject H0 if p-value < 0.05\n"
+        "4. Rolling mean analysis\n"
+        "   - Windows: [50, 100, 250, 500]\n"
+        "   - Stationary series should have constant mean\n"
+        "5. Rolling variance analysis\n"
+        "   - Windows: [50, 100, 250, 500]\n"
+        "   - Stationary series may still have variance clustering\n"
+        "\n"
+        "Using both ADF and KPSS together provides a stronger conclusion:\n"
+        "- ADF rejects unit root + KPSS fails to reject stationarity = stationary\n"
+        "- ADF fails to reject + KPSS rejects stationarity = non-stationary\n"
+        "- Both reject = inconclusive (may need differencing)\n"
+        "- Both fail to reject = insufficient evidence"
+    ),
+    "statistics": [
+        "ADF Statistic",
+        "ADF p-value",
+        "ADF critical values (1%, 5%, 10%)",
+        "ADF used lags",
+        "KPSS Statistic",
+        "KPSS p-value",
+        "KPSS used lags",
+        "Rolling Mean (windows: 50, 100, 250, 500)",
+        "Rolling Variance (windows: 50, 100, 250, 500)"
+    ],
+    "stationarity_conclusion_rules": {
+        "stationary": "ADF p < 0.05 AND KPSS p > 0.05",
+        "non_stationary": "ADF p > 0.05 AND KPSS p < 0.05",
+        "inconclusive": "Both reject or both fail to reject"
+    }
+}

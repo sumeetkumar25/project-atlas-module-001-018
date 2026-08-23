@@ -1,0 +1,243 @@
+# atlas/modules/module001_return_distribution/module.py
+"""
+Module 001: Return Distribution Analysis v2.3
+
+FIXED: Lifecycle management moved to ModuleRunner.
+Module __init__ no longer transitions registry state.
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Dict, Any, Optional
+from pathlib import Path
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.core.returns_utils import log_returns
+from atlas.core.statistics_utils import (
+    descriptive_stats,
+    normality_tests,
+    tail_metrics,
+    autocorrelation_metrics
+)
+from atlas.framework.protocol import ResearchProtocol, ModuleStatus, ModuleCategory
+from atlas.framework.registry import AtlasRegistry
+
+# Module metadata - inspectable by other modules
+MODULE_INFO = {
+    "id": "001",
+    "title": "Return Distribution Analysis",
+    "author": "Project Atlas",
+    "version": "2.3.0",
+    "category": "Distribution Analysis",
+    "research_date": "2026-07-04",
+    "requires": ["module_000_data_integrity"],
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": [
+        "return_distribution",
+        "descriptive_statistics",
+        "normality_tests",
+        "tail_statistics",
+        "autocorrelation_analysis",
+        "ljung_box_test"
+    ],
+    "kurtosis_convention": "Fisher (excess kurtosis, normal=0)",
+    "return_method": "log_returns"
+}
+
+class ReturnDistributionResearch(BaseResearchModule):
+    """
+    Characterize return distribution for a single dataset.
+    
+    IMPORTANT: This module does NOT manage its own lifecycle.
+    Lifecycle transitions (Planned→InProgress→Completed→Validated)
+    are handled by ModuleRunner.run_on_datasets().
+    
+    Each instance processes ONE dataset.
+    """
+    
+    PROTOCOL = ResearchProtocol(
+        module_id="001",
+        module_name="Return Distribution Analysis",
+        category=ModuleCategory.DISTRIBUTION,
+        question="What are the statistical properties of returns for this timeframe?",
+        hypothesis="Returns may exhibit non-normal distribution characteristics with fat tails.",
+        rationale="Understanding return distributions is foundational for volatility modeling and risk assessment.",
+        methodology="1. Calculate log returns from close prices\n"
+                   "2. Compute descriptive statistics (moments, percentiles)\n"
+                   "3. Test for normality (Shapiro-Wilk, Jarque-Bera, KS)\n"
+                   "4. Analyze tail behavior (threshold = 2σ)\n"
+                   "5. Measure autocorrelation with Ljung-Box test",
+        statistics=[
+            "Log returns",
+            "Descriptive statistics (mean, std, skewness, excess/pearson kurtosis)",
+            "Normality tests (Shapiro-Wilk, Jarque-Bera, KS)",
+            "Tail metrics (threshold=2σ)",
+            "Autocorrelation (ACF lags 1,5,10,20,50)",
+            "Ljung-Box test"
+        ],
+        depends_on=["000"],
+        required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+        author="Project Atlas",
+        version="2.3.0",
+        status=ModuleStatus.PLANNED,
+        limitations=[
+            "Results limited to available data period",
+            "Distribution properties may be time-varying"
+        ],
+        produces=[
+            "return_distribution",
+            "descriptive_statistics",
+            "normality_tests",
+            "tail_statistics",
+            "autocorrelation_analysis",
+            "ljung_box_test"
+        ],
+        future_research=[
+            "Time-varying distribution parameters",
+            "Regime-specific distributions"
+        ]
+    )
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(
+            module_name="ReturnDistribution",
+            module_version="2.3.0"
+        )
+        self.registry = registry or AtlasRegistry()
+        
+        # Register protocol if not exists (no status transition)
+        existing = self.registry.get_module("001")
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        
+        # NO LIFECYCLE TRANSITION HERE
+        # Lifecycle is managed by ModuleRunner
+    
+    def _register_pipeline_steps(self):
+        """Register computation steps"""
+        self.pipeline_steps = [
+            ('calculate_returns', self._calculate_returns),
+            ('descriptive_stats', self._compute_descriptive_stats),
+            ('normality_tests', self._test_normality),
+            ('tail_analysis', self._analyze_tails),
+            ('autocorrelation', self._analyze_autocorrelation),
+        ]
+    
+    def _calculate_returns(self) -> Dict[str, Any]:
+        """Step 1: Calculate log returns"""
+        self.logger.info("Calculating log returns from close prices")
+        returns = log_returns(self.df['close']).dropna()
+        self._returns = returns
+        return {
+            'return_observations': len(returns),
+            'first_return_date': str(self.df['timestamp'].iloc[1]) if 'timestamp' in self.df.columns else "N/A",
+            'last_return_date': str(self.df['timestamp'].iloc[-1]) if 'timestamp' in self.df.columns else "N/A"
+        }
+    
+    def _compute_descriptive_stats(self) -> Dict[str, Any]:
+        """Step 2: Descriptive statistics"""
+        self.logger.info("Computing descriptive statistics")
+        stats = descriptive_stats(self._returns)
+        self.result.add_artifact('returns', self._returns)
+        
+        self.logger.metric("Observations", f"{stats['count']:,}")
+        self.logger.metric("Mean", f"{stats['mean']:.8f}")
+        self.logger.metric("Std Dev", f"{stats['std']:.8f}")
+        self.logger.metric("Skewness", f"{stats['skewness']:.4f}")
+        self.logger.metric("Excess Kurtosis", f"{stats['kurtosis_excess']:.4f}")
+        self.logger.metric("Pearson Kurtosis", f"{stats['kurtosis_pearson']:.4f}")
+        
+        observed_excess_kurt = stats['kurtosis_excess']
+        self.logger.info(f"Excess kurtosis (Fisher): {observed_excess_kurt:.4f} (normal = 0)")
+        
+        if abs(observed_excess_kurt) > 1:
+            self.logger.info(f"  |Excess kurtosis| = {abs(observed_excess_kurt):.2f} > 1 - substantial non-normal tails")
+        
+        observed_skew = stats['skewness']
+        if abs(observed_skew) > 0.5:
+            direction = "negative" if observed_skew < 0 else "positive"
+            self.logger.info(f"Skewness: {observed_skew:.4f} ({direction})")
+        
+        return stats
+    
+    def _test_normality(self) -> Dict[str, Any]:
+        """Step 3: Normality tests"""
+        self.logger.info("Running normality tests")
+        tests = normality_tests(self._returns)
+        
+        self.logger.metric("Shapiro-Wilk p", f"{tests['shapiro_p_value']:.6f}")
+        self.logger.metric("Jarque-Bera p", f"{tests['jarque_bera_p_value']:.6f}")
+        
+        if not tests['is_normal_at_5pct']:
+            self.logger.info("Normality rejected at 5% significance - typical for financial returns")
+        
+        return tests
+    
+    def _analyze_tails(self) -> Dict[str, Any]:
+        """Step 4: Tail analysis"""
+        self.logger.info("Analyzing tail behavior (threshold = 2σ)")
+        tails = tail_metrics(self._returns)
+        
+        self.logger.metric("Left tail events", f"{tails['left_tail_count']} ({tails['left_tail_pct']:.2f}%)")
+        self.logger.metric("Right tail events", f"{tails['right_tail_count']} ({tails['right_tail_pct']:.2f}%)")
+        self.logger.metric("Tail ratio (L/R)", f"{tails['tail_ratio']:.2f}")
+        
+        return tails
+    
+    def _analyze_autocorrelation(self) -> Dict[str, Any]:
+        """Step 5: Autocorrelation with Ljung-Box"""
+        self.logger.info("Computing autocorrelation (Ljung-Box test)")
+        acf = autocorrelation_metrics(self._returns)
+        
+        significant_lags = []
+        for key, value in acf.items():
+            if 'acf_lag_' in key and 'ljung' not in key:
+                lag_num = key.replace('acf_lag_', '')
+                self.logger.metric(f"ACF Lag {lag_num}", f"{value:.6f}")
+                if abs(value) > 0.05:
+                    significant_lags.append(lag_num)
+        
+        if 'ljung_box_p_value' in acf:
+            p_val = acf['ljung_box_p_value']
+            self.logger.metric("Ljung-Box p", f"{p_val:.6f}")
+            if p_val < 0.05:
+                self.logger.info(f"Significant autocorrelation detected (p = {p_val:.4f})")
+        
+        if significant_lags:
+            self.logger.info(f"Lags with |ACF| > 0.05: {', '.join(significant_lags)}")
+        
+        return acf
+    
+    def compute(self) -> Dict[str, Any]:
+        """Execute pipeline steps"""
+        all_results = {}
+        
+        for step_name, step_func in self.pipeline_steps:
+            self.logger.info(f"Step: {step_name}")
+            step_result = step_func()
+            all_results.update(step_result)
+        
+        # Evidence-based conclusions
+        conclusions = []
+        if 'kurtosis_excess' in all_results and abs(all_results['kurtosis_excess']) > 1:
+            conclusions.append(
+                f"Excess kurtosis = {all_results['kurtosis_excess']:.2f} indicates non-normal tails"
+            )
+        if 'skewness' in all_results and abs(all_results['skewness']) > 0.5:
+            direction = "negative" if all_results['skewness'] < 0 else "positive"
+            conclusions.append(f"Skewness = {all_results['skewness']:.2f} indicates {direction} asymmetry")
+        if 'shapiro_p_value' in all_results and all_results['shapiro_p_value'] <= 0.05:
+            conclusions.append(f"Shapiro-Wilk rejects normality (p = {all_results['shapiro_p_value']:.4f})")
+        if 'ljung_box_p_value' in all_results and all_results['ljung_box_p_value'] < 0.05:
+            conclusions.append(f"Ljung-Box indicates autocorrelation (p = {all_results['ljung_box_p_value']:.4f})")
+        
+        all_results['conclusions'] = '; '.join(conclusions) if conclusions else "No strong deviations detected"
+        return all_results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        """
+        Execute research for a single dataset.
+        
+        No lifecycle management here - that's the runner's responsibility.
+        """
+        return super().run(filepath, output_dir)

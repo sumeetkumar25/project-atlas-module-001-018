@@ -1,0 +1,7 @@
+# atlas/modules/module008_trend_continuation/__init__.py
+"""
+Module 008: Trend Continuation Probability
+Measures the probability that a trend resumes after a pullback.
+
+Chain: Module 005 → Module 007 → Module 008
+"""

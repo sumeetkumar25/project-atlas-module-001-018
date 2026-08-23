@@ -1,0 +1,197 @@
+# atlas/modules/module003_return_dependency/test_module.py
+"""
+Module 003 Phase 1 Test Runner
+Validates autocorrelation calculations.
+"""
+
+import sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+from atlas.modules.module003_return_dependency.module import ReturnDependencyResearch
+from atlas.modules.module003_return_dependency.constants import MAX_AUTOCORRELATION_LAG
+from atlas.runner import ModuleRunner
+from atlas.framework.registry import AtlasRegistry
+from atlas.framework.framework_check import FrameworkChecker
+
+
+def test_autocorrelation_outputs(result, dataset_name: str) -> bool:
+    """Validate autocorrelation calculations"""
+    print(f"\n  Validating {dataset_name}:")
+    
+    checks_passed = 0
+    checks_failed = 0
+    
+    # Check artifact exists
+    if 'autocorrelation' not in result.artifacts:
+        print(f"    ✗ Missing autocorrelation artifact")
+        return False
+    
+    acf_df = result.artifacts['autocorrelation']
+    
+    # Validation 1: Correct number of rows
+    if len(acf_df) == MAX_AUTOCORRELATION_LAG:
+        print(f"    ✓ {len(acf_df)} rows (expected {MAX_AUTOCORRELATION_LAG})")
+        checks_passed += 1
+    else:
+        print(f"    ✗ {len(acf_df)} rows (expected {MAX_AUTOCORRELATION_LAG})")
+        checks_failed += 1
+    
+    # Validation 2: Correct lag range
+    if acf_df["lag"].iloc[0] == 1 and acf_df["lag"].iloc[-1] == MAX_AUTOCORRELATION_LAG:
+        print(f"    ✓ Lags 1 to {MAX_AUTOCORRELATION_LAG}")
+        checks_passed += 1
+    else:
+        print(f"    ✗ Lag range: {acf_df['lag'].iloc[0]} to {acf_df['lag'].iloc[-1]}")
+        checks_failed += 1
+    
+    # Validation 3: All ACF values in [-1, 1]
+    acf_values = acf_df["autocorrelation"]
+    if (acf_values >= -1).all() and (acf_values <= 1).all():
+        print(f"    ✓ All ACF values in [-1, 1]")
+        checks_passed += 1
+    else:
+        min_val = acf_values.min()
+        max_val = acf_values.max()
+        print(f"    ✗ ACF range: [{min_val:.4f}, {max_val:.4f}]")
+        checks_failed += 1
+    
+    # Validation 4: No NaN values
+    if not acf_df["autocorrelation"].isna().any():
+        print(f"    ✓ No NaN values")
+        checks_passed += 1
+    else:
+        nan_count = acf_df["autocorrelation"].isna().sum()
+        print(f"    ✗ {nan_count} NaN values")
+        checks_failed += 1
+    
+    # Validation 5: Required columns present
+    required_cols = ["lag", "autocorrelation", "abs_autocorrelation", "significant"]
+    missing = [c for c in required_cols if c not in acf_df.columns]
+    if not missing:
+        print(f"    ✓ All required columns present")
+        checks_passed += 1
+    else:
+        print(f"    ✗ Missing columns: {missing}")
+        checks_failed += 1
+    
+    # Validation 6: abs_autocorrelation matches absolute value
+    if np.allclose(acf_df["abs_autocorrelation"], acf_df["autocorrelation"].abs()):
+        print(f"    ✓ abs_autocorrelation correct")
+        checks_passed += 1
+    else:
+        print(f"    ✗ abs_autocorrelation mismatch")
+        checks_failed += 1
+    
+    # Display summary
+    print(f"\n    ACF Summary:")
+    print(f"    Observations: {result.statistics.get('observations', 'N/A'):,}")
+    print(f"    Standard Error: {result.statistics.get('standard_error', 0):.6f}")
+    print(f"    95% CI: [{result.statistics.get('lower_95ci', 0):.6f}, "
+          f"{result.statistics.get('upper_95ci', 0):.6f}]")
+    
+    # Strongest autocorrelation
+    strongest_lag = result.statistics.get('strongest_lag', 0)
+    strongest_acf = result.statistics.get('strongest_autocorrelation', 0)
+    print(f"\n    Strongest: Lag {strongest_lag} ({strongest_acf:+.6f})")
+    
+    # Top 5
+    print(f"    Top 5 lags by absolute correlation:")
+    for i in range(1, 6):
+        lag = result.statistics.get(f'top{i}_lag', 0)
+        acf = result.statistics.get(f'top{i}_acf', 0)
+        print(f"      {i}. Lag {lag:3d}: {acf:+.6f}")
+    
+    # Significant lags
+    n_sig = result.statistics.get('significant_lags_count', 0)
+    expected = result.statistics.get('expected_false_positives', 0)
+    print(f"\n    Significant lags: {n_sig}/{MAX_AUTOCORRELATION_LAG} (expected ~{expected:.1f})")
+    
+    if n_sig > expected * 2:
+        print(f"    Evidence AGAINST return independence")
+    else:
+        print(f"    Cannot reject return independence")
+    
+    print(f"\n    Result: {checks_passed} passed, {checks_failed} failed")
+    return checks_failed == 0
+
+
+def main():
+    """Test Module 003 Phase 1"""
+    
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 003 PHASE 1 TEST")
+    print("Return Dependency - Autocorrelation Analysis")
+    print("=" * 70)
+    
+    # Step 1: Framework health check
+    print("\n[1/4] Framework health check...")
+    checker = FrameworkChecker()
+    checker.run_all_checks()
+    
+    # Step 2: Initialize registry
+    print("\n[2/4] Initializing registry...")
+    registry = AtlasRegistry()
+    
+    # Step 3: Define datasets
+    datasets = {
+        "BTC_15m": "data/raw/BTCUSD_15m.csv",
+        "BTC_1h": "data/raw/BTCUSD_1h.csv",
+        "BTC_4h": "data/raw/BTCUSD_4h.csv",
+    }
+    
+    missing = [name for name, path in datasets.items() if not Path(path).exists()]
+    if missing:
+        print(f"\n✗ Missing data files: {missing}")
+        return 1
+    
+    # Step 4: Run Module 003
+    print("\n[3/4] Running Module 003 Phase 1...")
+    runner = ModuleRunner(registry=registry)
+    
+    results = runner.run_on_datasets(
+        module_class=ReturnDependencyResearch,
+        datasets=datasets,
+        output_base_dir="outputs/module003",
+        validate_after=False
+    )
+    
+    # Step 5: Validate outputs
+    print("\n[4/4] Validating outputs...")
+    
+    all_valid = True
+    
+    for dataset_name, result in results.items():
+        if result.status == "completed":
+            print(f"\n{'='*60}")
+            print(f"Dataset: {dataset_name}")
+            print(f"{'='*60}")
+            
+            is_valid = test_autocorrelation_outputs(result, dataset_name)
+            if not is_valid:
+                all_valid = False
+        else:
+            print(f"  ✗ {dataset_name}: Failed")
+            all_valid = False
+    
+    # Summary
+    print("\n" + "=" * 70)
+    print("PHASE 1 SUMMARY")
+    print("=" * 70)
+    
+    if all_valid:
+        print("\n✓ Module 003 Phase 1 complete on all datasets")
+        print("\nOutput files:")
+        for ds in datasets:
+            print(f"  outputs/module003/ReturnDependency/{ds}/autocorrelation.csv")
+        return 0
+    else:
+        print("\n✗ Validation failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

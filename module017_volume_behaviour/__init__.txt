@@ -1,0 +1,11 @@
+# atlas/modules/module017_volume_behaviour/__init__.py
+"""
+Module 017
+Volume Behaviour
+"""
+
+from .module import VolumeBehaviourResearch
+
+__all__ = [
+    "VolumeBehaviourResearch",
+]

@@ -1,0 +1,75 @@
+# atlas/modules/module010_volatility_persistence/protocol.py
+"""
+Module 010 Research Protocol
+Volatility Persistence Analysis
+"""
+
+from atlas.framework.protocol import ResearchProtocol, ModuleCategory
+from .config import MODULE_VERSION
+
+PROTOCOL = ResearchProtocol(
+    module_id="010",
+    module_name="Volatility Persistence",
+    category=ModuleCategory.VOLATILITY,
+    
+    question=(
+        "Once BTC enters a high- or low-volatility state, "
+        "how long does it remain there?"
+    ),
+    
+    hypothesis=(
+        "Volatility clusters into persistent regimes. "
+        "High-volatility periods and low-volatility periods "
+        "exhibit significant duration beyond random chance."
+    ),
+    
+    rationale=(
+        "Persistent volatility environments influence subsequent "
+        "market behavior, position sizing decisions, and risk "
+        "management."
+    ),
+    
+    methodology=(
+        "Phase 1: Skeleton (complete)\n"
+        "Phase 2.1: Log Returns (complete)\n"
+        "Phase 2.2: Rolling Volatility (complete)\n"
+        "Phase 2.3: Rolling Percentiles (current)\n"
+        "Phase 3: Regime Analysis (stubs)\n"
+        "Phase 4: Transition Analysis (stubs)"
+    ),
+    
+    statistics=[
+        "Realized volatility",
+        "Volatility percentile",
+        "Regime classification",
+        "Regime duration",
+        "Transition probability matrix",
+        "Persistence probability per regime"
+    ],
+    
+    depends_on=["000"],
+    required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+    author="Project Atlas",
+    version=MODULE_VERSION,
+    
+    produces=[
+        "log_returns",
+        "realized_volatility",
+        "volatility_percentiles",
+        "regime_states",
+        "regime_segments",
+        "transition_matrix"
+    ],
+    
+    limitations=[
+        "Results depend on window size selection",
+        "Regime boundaries are percentile-based",
+        "Does not forecast future volatility states"
+    ],
+    
+    future_research=[
+        "Multi-timeframe volatility comparison",
+        "Volatility forecasting models",
+        "Regime-conditional return distributions"
+    ]
+)

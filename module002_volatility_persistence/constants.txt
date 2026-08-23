@@ -1,0 +1,30 @@
+# atlas/modules/module002_volatility_persistence/constants.py
+"""
+Module 002 Constants
+Phase 2: Regime classification parameters.
+"""
+
+# Rolling windows for volatility calculation
+VOLATILITY_WINDOWS = [10, 20, 50, 100]
+
+# Phase 2 uses the long-term volatility estimate for regime classification
+PRIMARY_WINDOW = 100
+
+# Regime labels (from lowest to highest volatility)
+REGIME_LABELS = [
+    "VL",   # Very Low
+    "L",    # Low
+    "M",    # Medium
+    "H",    # High
+    "E"     # Extreme
+]
+
+# Percentile boundaries for regime classification
+# Divides the sample into roughly equal-sized groups
+REGIME_PERCENTILES = [
+    20,   # VL: 0-20th percentile
+    40,   # L:  20-40th percentile
+    60,   # M:  40-60th percentile
+    80    # H:  60-80th percentile
+          # E:  80-100th percentile
+]

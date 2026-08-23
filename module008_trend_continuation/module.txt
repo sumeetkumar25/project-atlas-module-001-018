@@ -1,0 +1,524 @@
+# atlas/modules/module008_trend_continuation/module.py
+"""
+Module 008: Trend Continuation Probability - Phase 1
+
+Measures the probability that a trend resumes after a pullback.
+
+UPDATED v1.1:
+- Volatility-aware adaptive thresholds (ATR-based)
+- Cross-module consistency with Module 007 recovery logic
+- Reference point: pullback end price
+"""
+
+from typing import Dict, Any, Optional, Tuple
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.protocol import ResearchProtocol, ModuleStatus, ModuleCategory
+from atlas.framework.registry import AtlasRegistry
+
+from .config import (
+    MODULE_ID,
+    MODULE_NAME,
+    MODULE_VERSION,
+    LOOKAHEAD_BARS,
+    THRESHOLD_METHOD,
+    FIXED_CONTINUATION_THRESHOLD,
+    FIXED_REVERSAL_THRESHOLD,
+    ATR_PERIOD,
+    ATR_MULTIPLIER,
+    DEPTH_BINS,
+    DURATION_BINS
+)
+from .protocol import PROTOCOL
+
+MODULE_INFO = {
+    "id": MODULE_ID,
+    "name": MODULE_NAME,
+    "version": MODULE_VERSION,
+    "author": "Project Atlas",
+    "phase": "Phase 1 - Continuation Probability",
+    "requires": ["000", "001", "005", "007"],
+    "depends_on_artifact": "Module 007 pullbacks (via set_pullbacks)",
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": [
+        "continuation_events",
+        "depth_probability",
+        "continuation_statistics"
+    ],
+    "threshold_method": THRESHOLD_METHOD,
+    "note": "Adaptive ATR-based thresholds. Reference from pullback end."
+}
+
+EVENT_COLUMNS = [
+    "trend_id",
+    "trend_direction",
+    "pullback_depth_pct",
+    "pullback_duration",
+    "pullback_end_price",
+    "threshold_pct",
+    "atr_value",
+    "outcome",
+    "bars_to_outcome",
+    "price_at_outcome",
+    "pct_change_from_pb_end",
+    "lookahead_bars_available",
+    "module007_recovered"
+]
+
+
+class TrendContinuationResearch(BaseResearchModule):
+    """
+    Module 008: Trend Continuation Probability - Phase 1
+    
+    After a pullback completes, scans forward to determine if the
+    original trend resumes or reverses.
+    
+    Thresholds:
+    - Adaptive (default): threshold = ATR_MULTIPLIER * ATR(20)
+      This adapts to each timeframe's volatility.
+    - Fixed: threshold = FIXED_THRESHOLD% (for testing/comparison)
+    
+    Cross-module consistency:
+    - Compares with Module 007's recovery flag
+    - Continuation in Module 008 should correlate with recovery in Module 007
+    """
+    
+    PROTOCOL = ResearchProtocol(
+        module_id=MODULE_ID,
+        module_name=MODULE_NAME,
+        category=ModuleCategory.REGIME,
+        question=PROTOCOL["research_question"],
+        hypothesis=PROTOCOL["null_hypothesis"],
+        rationale=PROTOCOL["rationale"],
+        methodology=PROTOCOL["methodology"],
+        statistics=PROTOCOL["statistics"],
+        depends_on=["000", "001", "005", "007"],
+        required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+        author="Project Atlas",
+        version=MODULE_VERSION,
+        status=ModuleStatus.PLANNED,
+        produces=["continuation_events", "depth_probability"]
+    )
+    
+    MODULE_INFO = MODULE_INFO
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(
+            module_name=MODULE_NAME,
+            module_version=MODULE_VERSION
+        )
+        self.registry = registry or AtlasRegistry()
+        
+        existing = self.registry.get_module(MODULE_ID)
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        
+        self.pullbacks: Optional[pd.DataFrame] = None
+        self.events: Optional[pd.DataFrame] = None
+        self.output_dir: Optional[str] = None
+        self._atr: Optional[float] = None
+    
+    def set_pullbacks(self, pullbacks: pd.DataFrame) -> None:
+        """Set pullback events from Module 007"""
+        required_cols = ['trend_id', 'trend_direction', 'pullback_end_idx',
+                        'pullback_depth_pct', 'pullback_duration', 'pullback_end_price']
+        missing = [c for c in required_cols if c not in pullbacks.columns]
+        if missing:
+            raise ValueError(f"Pullbacks missing required columns: {missing}")
+        
+        self.pullbacks = pullbacks.copy()
+        self.logger.success(f"Received {len(self.pullbacks)} pullbacks in-memory")
+    
+    def _register_pipeline_steps(self):
+        self.pipeline_steps = [
+            ("load_pullbacks", self._load_pullbacks),
+            ("calculate_threshold", self._calculate_threshold),
+            ("evaluate_future", self._evaluate_future),
+            ("statistics", self._statistics),
+        ]
+    
+    def _load_pullbacks(self) -> Dict[str, Any]:
+        """Load pullback events"""
+        if self.pullbacks is not None:
+            self.logger.success(f"Using {len(self.pullbacks)} pullback events")
+            return {"pullbacks_loaded": len(self.pullbacks)}
+        
+        self.logger.info("No pullbacks supplied - generating from chain")
+        
+        try:
+            from atlas.modules.module007_pullback_statistics.module import PullbackResearch
+            from atlas.modules.module005_trend_persistence.module import TrendPersistenceResearch
+            
+            trend_module = TrendPersistenceResearch(registry=self.registry)
+            trend_module.MIN_TREND_LENGTH = 1
+            trend_result = trend_module.run_dataframe(self.df, dataset_id="module008_trends")
+            
+            if 'trend_segments' not in trend_result.artifacts:
+                raise RuntimeError("Module 005 produced no trends")
+            
+            pullback_module = PullbackResearch(registry=self.registry)
+            pullback_module.set_trend_segments(trend_result.artifacts['trend_segments'])
+            pullback_result = pullback_module.run_dataframe(self.df, dataset_id="module008_pullbacks")
+            
+            if 'pullbacks' in pullback_result.artifacts:
+                self.pullbacks = pullback_result.artifacts['pullbacks']
+                self.logger.success(f"Generated {len(self.pullbacks)} pullbacks from chain")
+                return {"pullbacks_loaded": len(self.pullbacks), "pullbacks_source": "chain_generated"}
+            
+        except Exception as e:
+            self.logger.warning(f"Chain generation failed: {e}")
+        
+        raise RuntimeError("Module 008 requires pullbacks from Module 007.")
+    
+    # ============================================================
+    # Step 1.5: Calculate Adaptive Threshold
+    # ============================================================
+    
+    def _calculate_threshold(self) -> Dict[str, Any]:
+        """
+        Calculate the threshold for continuation/reversal detection.
+        
+        Adaptive method: threshold = ATR_MULTIPLIER * ATR(period)
+        This adapts to each timeframe's natural volatility.
+        
+        Fixed method: threshold = configured percentage
+        """
+        if THRESHOLD_METHOD == "adaptive":
+            # Calculate ATR (Average True Range)
+            high = self.df['high'].values
+            low = self.df['low'].values
+            close = self.df['close'].values
+            
+            # True Range calculation
+            tr = np.zeros(len(close))
+            for i in range(1, len(close)):
+                tr[i] = max(
+                    high[i] - low[i],
+                    abs(high[i] - close[i-1]),
+                    abs(low[i] - close[i-1])
+                )
+            
+            # ATR as exponential moving average of TR
+            atr_series = pd.Series(tr).ewm(span=ATR_PERIOD, adjust=False).mean()
+            self._atr = float(atr_series.iloc[-1])
+            
+            # Convert ATR to percentage threshold
+            avg_price = float(close[-100:].mean()) if len(close) >= 100 else float(close.mean())
+            threshold_pct = (self._atr * ATR_MULTIPLIER) / avg_price * 100
+            
+            self.logger.info(f"Adaptive threshold calculation:")
+            self.logger.metric("ATR period", f"{ATR_PERIOD}")
+            self.logger.metric("ATR value", f"{self._atr:.6f}")
+            self.logger.metric("Average price", f"{avg_price:.2f}")
+            self.logger.metric("Threshold %", f"{threshold_pct:.4f}%")
+            self.logger.metric("Multiplier", f"{ATR_MULTIPLIER}x")
+            
+            return {
+                "threshold_method": "adaptive",
+                "atr_value": self._atr,
+                "atr_period": ATR_PERIOD,
+                "atr_multiplier": ATR_MULTIPLIER,
+                "threshold_pct": round(threshold_pct, 6),
+                "avg_price": round(avg_price, 2)
+            }
+        else:
+            threshold_pct = FIXED_CONTINUATION_THRESHOLD
+            self.logger.info(f"Fixed threshold: {threshold_pct}%")
+            
+            return {
+                "threshold_method": "fixed",
+                "threshold_pct": threshold_pct
+            }
+    
+    # ============================================================
+    # Step 2: Evaluate Future from PULLBACK END
+    # ============================================================
+    
+    def _get_threshold_pct(self) -> float:
+        """Get the current threshold percentage"""
+        if THRESHOLD_METHOD == "adaptive" and self._atr is not None:
+            close = self.df['close'].values
+            avg_price = float(close[-100:].mean()) if len(close) >= 100 else float(close.mean())
+            return (self._atr * ATR_MULTIPLIER) / avg_price * 100
+        return FIXED_CONTINUATION_THRESHOLD
+    
+    def _evaluate_future(self) -> Dict[str, Any]:
+        """
+        Scan forward from PULLBACK END to determine outcome.
+        
+        Uses adaptive or fixed threshold based on configuration.
+        Also tracks Module 007 recovery status for cross-validation.
+        """
+        threshold_pct = self._get_threshold_pct()
+        
+        self.logger.info(f"Evaluating future from pullback end")
+        self.logger.info(f"  Lookahead: {LOOKAHEAD_BARS} bars")
+        self.logger.info(f"  Threshold: ±{threshold_pct:.4f}% from pullback end")
+        self.logger.info(f"  Method: {THRESHOLD_METHOD}")
+        
+        if self.pullbacks is None or len(self.pullbacks) == 0:
+            self.events = pd.DataFrame(columns=EVENT_COLUMNS)
+            self.result.artifacts["continuation_events"] = self.events
+            return {"events_evaluated": 0}
+        
+        close_prices = self.df['close'].values
+        n_bars = len(close_prices)
+        
+        events = []
+        outcome_counts = {"continuation": 0, "reversal": 0, "undecided": 0}
+        
+        for _, pb in self.pullbacks.iterrows():
+            trend_id = pb['trend_id']
+            direction_str = pb['trend_direction']
+            is_uptrend = direction_str == "Up"
+            
+            pullback_end_idx = int(pb['pullback_end_idx'])
+            pullback_end_price = float(pb['pullback_end_price'])
+            
+            # Module 007 recovery status for cross-validation
+            module007_recovered = bool(pb.get('recovered', False))
+            
+            lookahead_start = pullback_end_idx + 1
+            lookahead_end = min(lookahead_start + LOOKAHEAD_BARS, n_bars)
+            
+            if lookahead_start >= n_bars:
+                events.append({
+                    "trend_id": trend_id,
+                    "trend_direction": direction_str,
+                    "pullback_depth_pct": float(pb['pullback_depth_pct']),
+                    "pullback_duration": int(pb['pullback_duration']),
+                    "pullback_end_price": pullback_end_price,
+                    "threshold_pct": threshold_pct,
+                    "atr_value": self._atr if self._atr else 0,
+                    "outcome": "undecided",
+                    "bars_to_outcome": 0,
+                    "price_at_outcome": pullback_end_price,
+                    "pct_change_from_pb_end": 0.0,
+                    "lookahead_bars_available": 0,
+                    "module007_recovered": module007_recovered
+                })
+                outcome_counts["undecided"] += 1
+                continue
+            
+            # Threshold prices from pullback end
+            up_threshold = pullback_end_price * (1 + threshold_pct / 100)
+            down_threshold = pullback_end_price * (1 - threshold_pct / 100)
+            
+            outcome = "undecided"
+            bars_to_outcome = 0
+            price_at_outcome = pullback_end_price
+            
+            # Scan forward bar-by-bar
+            for i in range(lookahead_start, lookahead_end):
+                current_price = close_prices[i]
+                bars_elapsed = i - pullback_end_idx
+                
+                if is_uptrend:
+                    # Continuation: price rises from pullback end
+                    if current_price >= up_threshold:
+                        outcome = "continuation"
+                        bars_to_outcome = bars_elapsed
+                        price_at_outcome = current_price
+                        break
+                    # Reversal: price falls from pullback end
+                    if current_price <= down_threshold:
+                        outcome = "reversal"
+                        bars_to_outcome = bars_elapsed
+                        price_at_outcome = current_price
+                        break
+                else:
+                    # Continuation: price falls from pullback end
+                    if current_price <= down_threshold:
+                        outcome = "continuation"
+                        bars_to_outcome = bars_elapsed
+                        price_at_outcome = current_price
+                        break
+                    # Reversal: price rises from pullback end
+                    if current_price >= up_threshold:
+                        outcome = "reversal"
+                        bars_to_outcome = bars_elapsed
+                        price_at_outcome = current_price
+                        break
+            
+            pct_change = (price_at_outcome - pullback_end_price) / pullback_end_price * 100
+            
+            events.append({
+                "trend_id": trend_id,
+                "trend_direction": direction_str,
+                "pullback_depth_pct": float(pb['pullback_depth_pct']),
+                "pullback_duration": int(pb['pullback_duration']),
+                "pullback_end_price": pullback_end_price,
+                "threshold_pct": threshold_pct,
+                "atr_value": self._atr if self._atr else 0,
+                "outcome": outcome,
+                "bars_to_outcome": bars_to_outcome,
+                "price_at_outcome": float(price_at_outcome),
+                "pct_change_from_pb_end": round(pct_change, 4),
+                "lookahead_bars_available": lookahead_end - lookahead_start,
+                "module007_recovered": module007_recovered
+            })
+            
+            outcome_counts[outcome] += 1
+        
+        self.events = pd.DataFrame(events, columns=EVENT_COLUMNS)
+        self.result.artifacts["continuation_events"] = self.events
+        
+        n_events = len(self.events)
+        n_cont = outcome_counts["continuation"]
+        n_rev = outcome_counts["reversal"]
+        n_und = outcome_counts["undecided"]
+        
+        self.logger.metric("Events", f"{n_events:,}")
+        self.logger.metric("Continuations", f"{n_cont} ({n_cont/n_events*100:.1f}%)" if n_events > 0 else "0")
+        self.logger.metric("Reversals", f"{n_rev} ({n_rev/n_events*100:.1f}%)" if n_events > 0 else "0")
+        self.logger.metric("Undecided", f"{n_und} ({n_und/n_events*100:.1f}%)" if n_events > 0 else "0")
+        
+        # Cross-module consistency check
+        if 'module007_recovered' in self.events.columns:
+            recovered_events = self.events[self.events['module007_recovered']]
+            if len(recovered_events) > 0:
+                recovered_cont_rate = float((recovered_events['outcome'] == 'continuation').mean())
+                self.logger.info(f"\n  Cross-module check (Module 007 recovery):")
+                self.logger.info(f"  Module 007 recovered pullbacks: {len(recovered_events)}")
+                self.logger.info(f"  Of those, Module 008 continuation: {recovered_cont_rate*100:.1f}%")
+        
+        return {
+            "events_evaluated": n_events,
+            "continuations": n_cont,
+            "reversals": n_rev,
+            "undecided": n_und
+        }
+    
+    # ============================================================
+    # Step 3: Statistics
+    # ============================================================
+    
+    def _statistics(self) -> Dict[str, Any]:
+        """Compute continuation statistics"""
+        self.logger.info("Computing continuation statistics")
+        
+        if self.events is None or len(self.events) == 0:
+            stats = {"events_evaluated": 0, "continuation_rate": 0.0,
+                    "reversal_rate": 0.0, "undecided_rate": 0.0}
+            for key, value in stats.items():
+                self.result.statistics[key] = value
+            return stats
+        
+        n = len(self.events)
+        outcome_dist = self.events['outcome'].value_counts()
+        
+        stats = {
+            "events_evaluated": n,
+            "continuation_rate": float(outcome_dist.get('continuation', 0) / n),
+            "reversal_rate": float(outcome_dist.get('reversal', 0) / n),
+            "undecided_rate": float(outcome_dist.get('undecided', 0) / n),
+            "mean_depth_pct": float(self.events['pullback_depth_pct'].mean()),
+            "mean_duration": float(self.events['pullback_duration'].mean()),
+            "threshold_pct": float(self.events['threshold_pct'].iloc[0]) if n > 0 else 0,
+            "threshold_method": THRESHOLD_METHOD,
+            "probability_sum": round(
+                (outcome_dist.get('continuation', 0) +
+                 outcome_dist.get('reversal', 0) +
+                 outcome_dist.get('undecided', 0)) / n * 100, 1
+            )
+        }
+        
+        # Cross-module consistency
+        if 'module007_recovered' in self.events.columns:
+            recovered = self.events[self.events['module007_recovered']]
+            not_recovered = self.events[~self.events['module007_recovered']]
+            
+            if len(recovered) > 0:
+                stats['m007_recovered_cont_rate'] = float((recovered['outcome'] == 'continuation').mean())
+            if len(not_recovered) > 0:
+                stats['m007_not_recovered_cont_rate'] = float((not_recovered['outcome'] == 'continuation').mean())
+        
+        # By direction
+        for direction in ["Up", "Down"]:
+            mask = self.events['trend_direction'] == direction
+            subset = self.events[mask]
+            if len(subset) > 0:
+                d = direction.lower()
+                sub_dist = subset['outcome'].value_counts()
+                n_sub = len(subset)
+                stats[f"{d}_count"] = n_sub
+                stats[f"{d}_continuation_rate"] = float(sub_dist.get('continuation', 0) / n_sub)
+                stats[f"{d}_reversal_rate"] = float(sub_dist.get('reversal', 0) / n_sub)
+        
+        # Depth bins
+        depth_rows = []
+        for low, high in DEPTH_BINS:
+            mask = (self.events['pullback_depth_pct'] >= low) & (self.events['pullback_depth_pct'] < high)
+            subset = self.events[mask]
+            if len(subset) > 0:
+                sub_dist = subset['outcome'].value_counts()
+                n_sub = len(subset)
+                depth_rows.append({
+                    "depth_bin": f"{low}-{high}%",
+                    "sample_size": n_sub,
+                    "continuation_pct": round(float(sub_dist.get('continuation', 0) / n_sub) * 100, 1),
+                    "reversal_pct": round(float(sub_dist.get('reversal', 0) / n_sub) * 100, 1),
+                    "undecided_pct": round(float(sub_dist.get('undecided', 0) / n_sub) * 100, 1)
+                })
+        
+        depth_table = pd.DataFrame(depth_rows)
+        self.result.artifacts["depth_probability"] = depth_table
+        
+        # Duration bins
+        duration_rows = []
+        for low, high in DURATION_BINS:
+            mask = (self.events['pullback_duration'] >= low) & (self.events['pullback_duration'] < high)
+            subset = self.events[mask]
+            if len(subset) > 0:
+                sub_dist = subset['outcome'].value_counts()
+                n_sub = len(subset)
+                duration_rows.append({
+                    "duration_bin": f"{low}-{high} bars",
+                    "sample_size": n_sub,
+                    "continuation_pct": round(float(sub_dist.get('continuation', 0) / n_sub) * 100, 1),
+                    "reversal_pct": round(float(sub_dist.get('reversal', 0) / n_sub) * 100, 1),
+                    "undecided_pct": round(float(sub_dist.get('undecided', 0) / n_sub) * 100, 1)
+                })
+        
+        duration_table = pd.DataFrame(duration_rows)
+        self.result.artifacts["duration_probability"] = duration_table
+        
+        # Display
+        self.logger.info(f"\nContinuation Statistics ({n:,} events, threshold={stats['threshold_pct']:.4f}%):")
+        self.logger.info(f"  Continuation: {stats['continuation_rate']*100:.1f}%")
+        self.logger.info(f"  Reversal:     {stats['reversal_rate']*100:.1f}%")
+        self.logger.info(f"  Undecided:    {stats['undecided_rate']*100:.1f}%")
+        self.logger.info(f"  Sum:          {stats['probability_sum']:.1f}%")
+        
+        if stats.get('m007_recovered_cont_rate') is not None:
+            self.logger.info(f"\n  Cross-module (Module 007 recovery = Module 008 continuation):")
+            self.logger.info(f"    Recovered pullbacks → cont: {stats['m007_recovered_cont_rate']*100:.1f}%")
+        
+        self.logger.info(f"\n  By depth:")
+        for _, row in depth_table.iterrows():
+            self.logger.info(f"    {row['depth_bin']:>10}: {row['continuation_pct']:5.1f}% cont (n={int(row['sample_size']):,})")
+        
+        for key, value in stats.items():
+            self.result.statistics[key] = value
+        
+        return stats
+    
+    def compute(self) -> Dict[str, Any]:
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Phase 1 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        self.output_dir = output_dir
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df: pd.DataFrame,
+                      dataset_id: str = "in_memory",
+                      output_dir: Optional[str] = None):
+        self.output_dir = output_dir
+        return super().run_dataframe(df, dataset_id, output_dir)

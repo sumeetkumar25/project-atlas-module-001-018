@@ -1,0 +1,54 @@
+# atlas/modules/module008_trend_continuation/protocol.py
+"""
+Research Protocol
+Module 008 - Trend Continuation Probability
+"""
+
+PROTOCOL = {
+    "module_id": "008",
+    "module_name": "Trend Continuation Probability",
+    "research_question": (
+        "After a pullback has occurred, what is the empirical probability "
+        "that the original trend resumes versus reverses?"
+    ),
+    "null_hypothesis": (
+        "Continuation probability equals reversal probability (50/50)."
+    ),
+    "alternative_hypothesis": (
+        "Continuation probability depends on pullback properties "
+        "(depth, duration)."
+    ),
+    "rationale": (
+        "Trend continuation probability is the core metric for trend-following "
+        "strategies. If pullbacks are typically followed by trend resumption, "
+        "pullbacks represent entry opportunities. If reversals dominate, "
+        "pullbacks should be treated as exit signals."
+    ),
+    "methodology": (
+        "Phase 1: Continuation Probability Measurement\n"
+        "1. Load pullback events from Module 007\n"
+        "2. For each pullback, look ahead 100 bars\n"
+        "3. Classify outcome: Continuation, Reversal, or Undecided\n"
+        "4. Compute overall continuation/reversal rates\n"
+        "5. Stratify by pullback depth and duration\n"
+        "\n"
+        "Architecture: Module 005 → Module 007 → Module 008"
+    ),
+    "phase": 1,
+    "inputs": [
+        "pullbacks (from Module 007)",
+        "OHLCV data"
+    ],
+    "outputs": [
+        "continuation_events",
+        "depth_probability",
+        "summary"
+    ],
+    "statistics": [
+        "continuation_rate",
+        "reversal_rate",
+        "undecided_rate",
+        "continuation_by_depth",
+        "continuation_by_duration"
+    ]
+}

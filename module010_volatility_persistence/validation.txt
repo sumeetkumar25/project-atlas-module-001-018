@@ -1,0 +1,173 @@
+# atlas/modules/module010_volatility_persistence/validation.py
+"""
+Atlas Return Validator
+Permanent validation for log return calculations.
+
+Canonical return validator for all Atlas modules.
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Tuple, List
+
+
+def validate_return_series(returns: pd.Series, 
+                           original_length: int,
+                           method: str = "log") -> Tuple[bool, List[str]]:
+    """Validate a calculated return series."""
+    warnings = []
+    is_valid = True
+    
+    if not pd.api.types.is_numeric_dtype(returns):
+        warnings.append("Return series is not numeric dtype")
+        return False, warnings
+    
+    if len(returns) != original_length:
+        warnings.append(f"Length mismatch: expected {original_length}, got {len(returns)}")
+        is_valid = False
+    
+    if len(returns) > 0 and not pd.isna(returns.iloc[0]):
+        warnings.append("First return value should be NaN")
+        is_valid = False
+    
+    if np.isinf(returns).any():
+        warnings.append(f"Found {int(np.isinf(returns).sum())} infinite values")
+        is_valid = False
+    
+    nan_count = int(returns.isna().sum())
+    if nan_count != 1:
+        warnings.append(f"Expected exactly 1 NaN, got {nan_count}")
+        if nan_count > 1:
+            is_valid = False
+    
+    valid = returns.dropna()
+    if len(valid) > 0 and not np.isfinite(valid).all():
+        warnings.append("Non-NaN returns contain non-finite values")
+        is_valid = False
+    
+    return is_valid, warnings
+
+
+def validate_price_series(prices: pd.Series) -> Tuple[bool, List[str]]:
+    """Validate price series before return calculation."""
+    warnings = []
+    is_valid = True
+    
+    if len(prices) < 2:
+        warnings.append(f"Need at least 2 prices, got {len(prices)}")
+        return False, warnings
+    
+    if prices.isna().any():
+        warnings.append(f"Prices contain {int(prices.isna().sum())} NaN values")
+        is_valid = False
+    
+    if (prices <= 0).any():
+        warnings.append(f"Found {int((prices <= 0).sum())} non-positive price(s)")
+        is_valid = False
+    
+    return is_valid, warnings
+
+
+def compute_log_returns(prices: pd.Series) -> pd.Series:
+    """Canonical Atlas log return calculation: r_t = ln(Close_t / Close_{t-1})"""
+    is_valid, warnings = validate_price_series(prices)
+    if not is_valid:
+        raise ValueError(f"Invalid price series: {'; '.join(warnings)}")
+    return np.log(prices / prices.shift(1))
+
+
+def test_known_prices():
+    prices = pd.Series([100.0, 110.0, 121.0])
+    returns = compute_log_returns(prices)
+    assert len(returns) == 3
+    assert pd.isna(returns.iloc[0])
+    assert np.allclose(returns.dropna().values, np.log([110/100, 121/110]), atol=1e-12)
+    return True
+
+def test_constant_prices():
+    prices = pd.Series([100.0, 100.0, 100.0])
+    returns = compute_log_returns(prices)
+    assert np.allclose(returns.dropna().values, 0.0, atol=1e-12)
+    return True
+
+def test_single_price():
+    try:
+        compute_log_returns(pd.Series([100.0]))
+        assert False
+    except ValueError:
+        pass
+    return True
+
+def test_random_prices():
+    np.random.seed(42)
+    prices = pd.Series(np.random.lognormal(0, 0.1, 1000) * 100)
+    returns = compute_log_returns(prices)
+    expected = np.log(prices.values[1:] / prices.values[:-1])
+    assert np.abs(returns.dropna().values - expected).max() < 1e-12
+    return True
+
+def test_missing_values():
+    try:
+        compute_log_returns(pd.Series([100.0, np.nan, 110.0]))
+        assert False
+    except ValueError:
+        pass
+    return True
+
+def test_zero_prices():
+    try:
+        compute_log_returns(pd.Series([100.0, 0.0, 110.0]))
+        assert False
+    except ValueError:
+        pass
+    return True
+
+def test_negative_prices():
+    try:
+        compute_log_returns(pd.Series([100.0, -5.0, 110.0]))
+        assert False
+    except ValueError:
+        pass
+    return True
+
+def test_length_preserved():
+    np.random.seed(42)
+    for n in [2, 10, 100, 1000]:
+        prices = pd.Series(np.random.lognormal(0, 0.01, n) * 100)
+        returns = compute_log_returns(prices)
+        assert len(returns) == n
+        assert pd.isna(returns.iloc[0])
+    return True
+
+
+def run_all_validation_tests():
+    print("\n" + "=" * 60)
+    print("ATLAS RETURN VALIDATOR - UNIT TESTS")
+    print("=" * 60)
+    tests = [
+        ("Known Prices", test_known_prices),
+        ("Constant Prices", test_constant_prices),
+        ("Single Price", test_single_price),
+        ("Random Prices", test_random_prices),
+        ("Missing Values", test_missing_values),
+        ("Zero Prices", test_zero_prices),
+        ("Negative Prices", test_negative_prices),
+        ("Length Preserved", test_length_preserved),
+    ]
+    results = {}
+    for name, fn in tests:
+        try:
+            fn()
+            results[name] = True
+            print(f"  ✓ {name}")
+        except Exception as e:
+            results[name] = False
+            print(f"  ✗ {name}: {e}")
+    passed = sum(results.values())
+    print(f"\n  {passed}/{len(tests)} passed\n" + "=" * 60)
+    return passed == len(tests)
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(0 if run_all_validation_tests() else 1)

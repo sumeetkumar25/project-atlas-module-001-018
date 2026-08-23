@@ -1,0 +1,233 @@
+# atlas/modules/module018_gap_behaviour/module.py
+"""
+Module 018
+Gap Behaviour
+
+All 5 steps implemented.
+"""
+
+from typing import Optional
+
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from atlas.core.gap import (
+    GapDetector,
+    GapClassifier,
+    GapStatistics,
+)
+
+from .config import *
+from .protocol import PROTOCOL
+
+
+class GapBehaviourResearch(BaseResearchModule):
+
+    PROTOCOL = PROTOCOL
+
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+    ):
+
+        super().__init__(
+            module_name=MODULE_NAME,
+            module_version=MODULE_VERSION,
+        )
+
+        self.registry = registry or AtlasRegistry()
+
+        existing = self.registry.get_module(MODULE_ID)
+
+        if not existing:
+            self.registry.register_module(PROTOCOL)
+
+        self.gaps = None
+        self.states = None
+        self.statistics = None
+
+    def _register_pipeline_steps(self):
+
+        self.pipeline_steps = [
+
+            ("detect", self._detect),
+
+            ("classify", self._classify),
+
+            ("statistics", self._statistics),
+
+            ("distribution", self._distribution),
+
+            ("export", self._export),
+
+        ]
+
+    # ---- Step 1: Detect ----
+    def _detect(self):
+
+        self.logger.info("Step 1: Detecting gaps")
+
+        self.gaps = GapDetector.detect(self.df)
+
+        self.result.artifacts["gap_series"] = self.gaps.copy()
+
+        gap_events = self.gaps[self.gaps["gap_size"] > 0].copy()
+        self.result.artifacts["gap_events"] = gap_events
+
+        count = len(gap_events)
+
+        direction_counts = self.gaps["gap_direction"].value_counts()
+        up_count = int(direction_counts.get("UP", 0))
+        down_count = int(direction_counts.get("DOWN", 0))
+
+        self.logger.metric("Gap events", f"{count:,}")
+        self.logger.metric("Gap Up", f"{up_count:,}")
+        self.logger.metric("Gap Down", f"{down_count:,}")
+
+        self.logger.success("Gap detection complete")
+
+        return {
+            "detection_status": "complete",
+            "gap_events": count,
+            "gap_up_count": up_count,
+            "gap_down_count": down_count,
+        }
+
+    # ---- Step 2: Classify ----
+    def _classify(self):
+
+        self.logger.info("Step 2: Classifying gaps")
+
+        self.states = GapClassifier.classify(self.gaps["gap_size"])
+        self.gaps["gap_state"] = self.states
+
+        counts = self.states.value_counts().sort_index()
+
+        for state, count in counts.items():
+            self.logger.metric(f"State {state}", f"{int(count):,}")
+
+        self.result.artifacts["gap_states"] = self.gaps.copy()
+
+        self.logger.success("Gap classification complete")
+
+        return {
+            "classification_status": "complete",
+            "classified_events": int((self.states > 0).sum()),
+        }
+
+    # ---- Step 3: Statistics ----
+    def _statistics(self):
+
+        self.logger.info("Step 3: Gap statistics")
+
+        self.statistics = GapStatistics.summary(self.gaps)
+
+        gap_events = self.gaps[self.gaps["gap_size"] > 0]
+        up_gaps = gap_events[gap_events["gap_direction"] == "UP"]["gap_size"]
+        down_gaps = gap_events[gap_events["gap_direction"] == "DOWN"]["gap_size"]
+
+        if len(up_gaps) > 0:
+            self.statistics["mean_gap_up"] = float(up_gaps.mean())
+            self.statistics["median_gap_up"] = float(up_gaps.median())
+            self.statistics["max_gap_up"] = float(up_gaps.max())
+        else:
+            self.statistics["mean_gap_up"] = 0.0
+            self.statistics["median_gap_up"] = 0.0
+            self.statistics["max_gap_up"] = 0.0
+
+        if len(down_gaps) > 0:
+            self.statistics["mean_gap_down"] = float(down_gaps.mean())
+            self.statistics["median_gap_down"] = float(down_gaps.median())
+            self.statistics["max_gap_down"] = float(down_gaps.max())
+        else:
+            self.statistics["mean_gap_down"] = 0.0
+            self.statistics["median_gap_down"] = 0.0
+            self.statistics["max_gap_down"] = 0.0
+
+        self.result.artifacts["gap_statistics"] = pd.DataFrame([self.statistics])
+
+        for k, v in self.statistics.items():
+            if isinstance(v, float):
+                self.logger.metric(k, f"{v:.4f}")
+            else:
+                self.logger.metric(k, f"{v:,}")
+
+        self.logger.success("Statistics complete")
+
+        return {
+            "statistics_status": "complete",
+            **self.statistics,
+        }
+
+    # ---- Step 4: Distribution ----
+    def _distribution(self):
+
+        self.logger.info("Step 4: Gap distribution")
+
+        gap_events = self.gaps[self.gaps["gap_size"] > 0]
+
+        distribution = (
+            gap_events["gap_state"]
+            .value_counts()
+            .sort_index()
+            .rename_axis("gap_state")
+            .reset_index(name="count")
+        )
+
+        total_gaps = distribution["count"].sum()
+        if total_gaps > 0:
+            distribution["percentage"] = (
+                distribution["count"] / total_gaps * 100
+            ).round(1)
+        else:
+            distribution["percentage"] = 0.0
+
+        self.result.artifacts["gap_distribution"] = distribution
+
+        self.logger.metric("Distribution rows", f"{len(distribution)}")
+
+        for _, row in distribution.iterrows():
+            self.logger.info(
+                f"  State {row['gap_state']}: {int(row['count'])} ({row['percentage']:.1f}%)"
+            )
+
+        self.logger.success("Distribution complete")
+
+        return {"distribution_status": "complete"}
+
+    # ---- Step 5: Export ----
+    def _export(self):
+
+        self.logger.info("Step 5: Export")
+
+        self.logger.metric("Artifacts", f"{len(self.result.artifacts)}")
+
+        for name, artifact in self.result.artifacts.items():
+            if hasattr(artifact, "__len__"):
+                self.logger.info(f"  {name}: {len(artifact)} rows")
+
+        self.logger.success("Export complete")
+
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+        }
+
+    def compute(self):
+
+        self.logger.section("Gap Behaviour Pipeline")
+        self.logger.info("Executing Steps 1-5")
+
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 018 complete")
+
+        return results
+
+    def run(self, filepath: str, output_dir=None):
+        return super().run(filepath, output_dir)
+
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        return super().run_dataframe(df, dataset_id, output_dir)

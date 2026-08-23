@@ -1,0 +1,636 @@
+# atlas/modules/module009_trade_excursion/module.py
+"""
+Module 009: Maximum Favorable / Adverse Excursion (MFE/MAE)
+
+FIXED v1.2:
+- Event validation layer validates entry_price against actual price data
+- Entry price always derived from dataset using entry_idx (not CSV value)
+- Direction validation catches non-standard values
+- Future window validation confirms correct data access
+- Debug artifact exports for transparency
+"""
+
+from typing import Dict, Any, Optional, List
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.protocol import ResearchProtocol, ModuleStatus, ModuleCategory
+from atlas.framework.registry import AtlasRegistry
+
+from .metadata import (
+    MODULE_ID,
+    MODULE_NAME,
+    MODULE_VERSION,
+    MODULE_INFO,
+    LOOKAHEAD_BARS,
+    MFE_THRESHOLDS,
+    MAE_THRESHOLDS
+)
+
+EVENT_COLUMNS = [
+    "trend_id",
+    "trend_direction",
+    "direction_normalized",
+    "pullback_depth_pct",
+    "pullback_duration",
+    "entry_price_actual",
+    "entry_price_csv",
+    "entry_idx",
+    "price_match",
+    "outcome_008",
+    "mfe_pct",
+    "mae_pct",
+    "rr_ratio",
+    "mfe_bar",
+    "mae_bar",
+    "mfe_price",
+    "mae_price",
+    "future_first",
+    "future_last",
+    "future_max",
+    "future_min",
+    "lookahead_bars_used"
+]
+
+MFE_DIST_BINS = [0, 0.5, 1, 2, 5, 10, 20, 40, 100]
+MFE_DIST_LABELS = ["0-0.5%", "0.5-1%", "1-2%", "2-5%", "5-10%", "10-20%", "20-40%", "40%+"]
+
+MAE_DIST_BINS = [0, 0.5, 1, 2, 5, 10, 20, 40, 100]
+MAE_DIST_LABELS = ["0-0.5%", "0.5-1%", "1-2%", "2-5%", "5-10%", "10-20%", "20-40%", "40%+"]
+
+RR_DIST_BINS = [0, 0.5, 1, 2, 3, 5, 10, 1000]
+RR_DIST_LABELS = ["0-0.5", "0.5-1", "1-2", "2-3", "3-5", "5-10", "10+"]
+
+
+def normalize_direction(direction: Any) -> str:
+    """
+    Normalize direction string to "Up" or "Down".
+    """
+    if direction is None:
+        return "Unknown"
+    
+    if isinstance(direction, (int, float, np.integer, np.floating)):
+        return "Up" if float(direction) > 0 else "Down"
+    
+    direction_str = str(direction).strip().upper()
+    
+    up_variants = ["UP", "UPTREND", "BULL", "LONG", "1", "+1", "BUY"]
+    down_variants = ["DOWN", "DOWNTREND", "BEAR", "SHORT", "-1", "SELL"]
+    
+    if direction_str in up_variants:
+        return "Up"
+    elif direction_str in down_variants:
+        return "Down"
+    
+    if "UP" in direction_str or "BULL" in direction_str or "LONG" in direction_str:
+        return "Up"
+    if "DOWN" in direction_str or "BEAR" in direction_str or "SHORT" in direction_str:
+        return "Down"
+    
+    return "Unknown"
+
+
+def compute_mfe_mae(entry_price: float, future_prices: np.ndarray,
+                    direction: str) -> tuple:
+    """
+    Compute MFE and MAE from entry price and future prices.
+    
+    MFE = maximum favorable excursion (potential profit)
+    MAE = maximum adverse excursion (potential loss)
+    Both always ≥ 0.
+    """
+    if len(future_prices) == 0:
+        return 0.0, 0.0, entry_price, entry_price, 0, 0
+    
+    max_price = future_prices.max()
+    min_price = future_prices.min()
+    
+    if direction == "Up":
+        mfe = (max_price - entry_price) / entry_price * 100
+        mae = (entry_price - min_price) / entry_price * 100
+        mfe_bar = int(np.argmax(future_prices))
+        mae_bar = int(np.argmin(future_prices))
+        mfe_price = float(max_price)
+        mae_price = float(min_price)
+    else:
+        mfe = (entry_price - min_price) / entry_price * 100
+        mae = (max_price - entry_price) / entry_price * 100
+        mfe_bar = int(np.argmin(future_prices))
+        mae_bar = int(np.argmax(future_prices))
+        mfe_price = float(min_price)
+        mae_price = float(max_price)
+    
+    mfe = max(0.0, mfe)
+    mae = max(0.0, mae)
+    
+    return mfe, mae, mfe_price, mae_price, mfe_bar, mae_bar
+
+
+class TradeExcursionResearch(BaseResearchModule):
+    """
+    Module 009: MFE/MAE Analysis - Phase 1
+    
+    FIXED v1.2:
+    - Event validation layer checks entry_price against actual close prices
+    - Entry price always derived from dataset[entry_idx], not CSV value
+    - Direction validation catches non-standard values
+    - Debug artifacts for transparency
+    """
+    
+    PROTOCOL = ResearchProtocol(
+        module_id=MODULE_ID,
+        module_name=MODULE_NAME,
+        category=ModuleCategory.VALIDATION,
+        question=MODULE_INFO["research_question"],
+        hypothesis=MODULE_INFO["null_hypothesis"],
+        rationale=MODULE_INFO.get("rationale", ""),
+        methodology=MODULE_INFO.get("methodology", ""),
+        statistics=[
+            "mean_mfe", "median_mfe", "std_mfe",
+            "mean_mae", "median_mae", "std_mae",
+            "median_rr", "rr_p25", "rr_p75", "rr_p90", "rr_p95",
+            "invalid_events", "price_mismatches", "direction_unknowns"
+        ],
+        depends_on=["001", "005", "007", "008"],
+        required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+        author="Project Atlas",
+        version=MODULE_VERSION,
+        status=ModuleStatus.PLANNED,
+        produces=["excursion_events", "event_validation", "reward_risk"]
+    )
+    
+    MODULE_INFO = MODULE_INFO
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(
+            module_name=MODULE_NAME,
+            module_version=MODULE_VERSION
+        )
+        self.registry = registry or AtlasRegistry()
+        
+        existing = self.registry.get_module(MODULE_ID)
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        
+        self.events: Optional[pd.DataFrame] = None
+        self.excursions: Optional[pd.DataFrame] = None
+        self.output_dir: Optional[str] = None
+        
+        # Validation counters
+        self._invalid_events: List[int] = []
+        self._price_mismatches: List[int] = []
+        self._direction_unknowns: List[str] = []
+        self._validation_debug: List[dict] = []
+        self._future_debug: List[dict] = []
+    
+    def set_events(self, events_df: pd.DataFrame) -> None:
+        """Accept continuation events from Module 008 in memory"""
+        required = ['trend_id', 'trend_direction', 'pullback_end_price',
+                   'pullback_depth_pct', 'pullback_duration']
+        missing = [c for c in required if c not in events_df.columns]
+        if missing:
+            raise ValueError(f"Events missing required columns: {missing}")
+        
+        self.events = events_df.copy()
+        self.logger.success(f"Received {len(self.events)} events in-memory from Module 008")
+    
+    def _register_pipeline_steps(self):
+        self.pipeline_steps = [
+            ("load_events", self._load_events),
+            ("validate_events", self._validate_events),
+            ("calculate_excursions", self._calculate_excursions),
+            ("statistics", self._statistics),
+        ]
+    
+    def _load_events(self) -> Dict[str, Any]:
+        """Load continuation events from Module 008"""
+        if self.events is not None:
+            self.logger.success(f"Using {len(self.events)} supplied events")
+            return {"events_loaded": len(self.events), "events_source": "in_memory"}
+        
+        self.logger.info("No events supplied - generating full chain")
+        
+        try:
+            from atlas.modules.module008_trend_continuation.module import TrendContinuationResearch
+            from atlas.modules.module007_pullback_statistics.module import PullbackResearch
+            from atlas.modules.module005_trend_persistence.module import TrendPersistenceResearch
+            
+            trend_module = TrendPersistenceResearch(registry=self.registry)
+            trend_module.MIN_TREND_LENGTH = 1
+            trend_result = trend_module.run_dataframe(self.df, dataset_id="module009_trends")
+            
+            pullback_module = PullbackResearch(registry=self.registry)
+            pullback_module.set_trend_segments(trend_result.artifacts['trend_segments'])
+            pullback_result = pullback_module.run_dataframe(self.df, dataset_id="module009_pullbacks")
+            
+            continuation_module = TrendContinuationResearch(registry=self.registry)
+            continuation_module.set_pullbacks(pullback_result.artifacts['pullbacks'])
+            continuation_result = continuation_module.run_dataframe(self.df, dataset_id="module009_continuation")
+            
+            if 'continuation_events' in continuation_result.artifacts:
+                self.events = continuation_result.artifacts['continuation_events']
+                self.logger.success(f"Generated {len(self.events)} events from full chain")
+                return {"events_loaded": len(self.events), "events_source": "chain_generated"}
+            
+        except Exception as e:
+            self.logger.warning(f"Chain generation failed: {e}")
+        
+        raise RuntimeError("Module 009 requires events from Module 008.")
+    
+    # ============================================================
+    # NEW: Event Validation Layer
+    # ============================================================
+    
+    def _validate_events(self) -> Dict[str, Any]:
+        """
+        Validate that every continuation event is internally consistent.
+        
+        Checks:
+        1. entry_idx is within valid range
+        2. entry_price from CSV matches actual close[entry_idx]
+        3. Direction is a recognized value (Up/Down)
+        
+        This does NOT modify data. It only reports inconsistencies.
+        Debug data is exported as artifact for inspection.
+        """
+        self.logger.section("Validating Event Alignment")
+        
+        close_prices = self.df['close'].values
+        n_bars = len(close_prices)
+        
+        self._invalid_events = []
+        self._price_mismatches = []
+        self._direction_unknowns = []
+        self._validation_debug = []
+        
+        valid_directions = {"UP", "DOWN"}
+        
+        for i, row in self.events.iterrows():
+            event_idx = i
+            
+            # Check 1: entry_idx validity
+            if 'entry_idx' not in row and 'pullback_end_idx' not in row:
+                self._invalid_events.append(event_idx)
+                continue
+            
+            idx = int(row.get('entry_idx', row.get('pullback_end_idx', -1)))
+            
+            if idx < 0 or idx >= n_bars:
+                self._invalid_events.append(event_idx)
+                continue
+            
+            # Check 2: Price match (CSV vs actual)
+            csv_price = float(row.get('entry_price', row.get('pullback_end_price', 0)))
+            actual_price = float(close_prices[idx])
+            
+            price_matches = abs(csv_price - actual_price) < 1e-8
+            
+            if not price_matches:
+                self._price_mismatches.append(event_idx)
+            
+            # Check 3: Direction validity
+            raw_direction = str(row.get('trend_direction', '')).upper()
+            if raw_direction not in valid_directions:
+                # Try normalization
+                normalized = normalize_direction(row.get('trend_direction', ''))
+                if normalized == "Unknown":
+                    self._direction_unknowns.append(raw_direction)
+            
+            # Collect debug data (first 20 events)
+            if len(self._validation_debug) < 20:
+                self._validation_debug.append({
+                    "event": event_idx,
+                    "entry_idx": idx,
+                    "entry_price_csv": round(csv_price, 2),
+                    "entry_price_actual": round(actual_price, 2),
+                    "price_match": price_matches,
+                    "direction_csv": row.get('trend_direction', ''),
+                    "direction_normalized": normalize_direction(row.get('trend_direction', ''))
+                })
+        
+        # Export validation debug
+        debug_df = pd.DataFrame(self._validation_debug)
+        self.result.artifacts["event_validation"] = debug_df
+        
+        # Report findings
+        n_total = len(self.events)
+        n_invalid = len(self._invalid_events)
+        n_mismatch = len(self._price_mismatches)
+        n_unknown_dir = len(self._direction_unknowns)
+        
+        self.logger.info(f"Events validated: {n_total:,}")
+        self.logger.info(f"  Valid: {n_total - n_invalid:,}")
+        self.logger.info(f"  Invalid (bad index): {n_invalid}")
+        self.logger.info(f"  Price mismatches: {n_mismatch}")
+        self.logger.info(f"  Unknown directions: {n_unknown_dir}")
+        
+        if n_invalid > 0:
+            self.logger.warning(f"⚠ {n_invalid} events have invalid entry indices")
+        
+        if n_mismatch > 0:
+            self.logger.warning(f"⚠ {n_mismatch} events have entry price mismatches")
+            self.logger.warning("  Module 008 may have exported wrong entry prices")
+            self.logger.warning("  Module 009 will use actual close prices (not CSV values)")
+        
+        if n_unknown_dir > 0:
+            self.logger.warning(f"⚠ Unknown direction values: {self._direction_unknowns}")
+        
+        # Show sample of validation data
+        if len(debug_df) > 0:
+            self.logger.info("\n  Sample validation (first 5):")
+            for _, d in debug_df.head(5).iterrows():
+                match_icon = "✓" if d['price_match'] else "✗"
+                self.logger.info(
+                    f"    Event {int(d['event']):3d}: idx={int(d['entry_idx']):,}  "
+                    f"csv={d['entry_price_csv']:>10.2f}  "
+                    f"actual={d['entry_price_actual']:>10.2f}  "
+                    f"{match_icon}  dir={d['direction_normalized']}"
+                )
+        
+        return {
+            "invalid_events": n_invalid,
+            "price_mismatches": n_mismatch,
+            "direction_unknowns": n_unknown_dir
+        }
+    
+    # ============================================================
+    # Step 3: Calculate Excursions
+    # ============================================================
+    
+    def _calculate_excursions(self) -> Dict[str, Any]:
+        """
+        For each valid event, measure MFE and MAE.
+        
+        FIXED: Entry price always derived from actual close[entry_idx].
+        Never trust the CSV entry_price - always use the dataset.
+        """
+        self.logger.info(f"Calculating MFE/MAE excursions (lookahead={LOOKAHEAD_BARS})")
+        self.logger.info("  Entry price: always derived from close[entry_idx] (not CSV)")
+        
+        if self.events is None or len(self.events) == 0:
+            self.excursions = pd.DataFrame(columns=EVENT_COLUMNS)
+            self.result.artifacts["excursion_events"] = self.excursions
+            return {"events_analyzed": 0}
+        
+        close_prices = self.df['close'].values
+        n_bars = len(close_prices)
+        
+        excursions = []
+        self._future_debug = []
+        direction_warnings = set()
+        mfe_direction_warnings = 0
+        
+        for i, ev in self.events.iterrows():
+            event_idx = i
+            
+            # Skip invalid events
+            if event_idx in self._invalid_events:
+                continue
+            
+            # FIXED: Always derive entry_price from actual dataset
+            idx = int(ev.get('entry_idx', ev.get('pullback_end_idx', -1)))
+            entry_price_actual = float(close_prices[idx])
+            entry_price_csv = float(ev.get('entry_price', ev.get('pullback_end_price', 0)))
+            
+            # Normalize direction
+            raw_direction = ev['trend_direction']
+            direction = normalize_direction(raw_direction)
+            
+            if direction == "Unknown":
+                direction_warnings.add(str(raw_direction))
+                direction = "Up"
+            
+            # Get future prices
+            lookahead_start = idx + 1
+            lookahead_end = min(lookahead_start + LOOKAHEAD_BARS, n_bars)
+            
+            if lookahead_start >= n_bars:
+                continue
+            
+            future_prices = close_prices[lookahead_start:lookahead_end]
+            
+            if len(future_prices) == 0:
+                continue
+            
+            # Compute MFE/MAE using ACTUAL entry price
+            mfe_pct, mae_pct, mfe_price, mae_price, mfe_bar, mae_bar = compute_mfe_mae(
+                entry_price_actual, future_prices, direction
+            )
+            
+            # Direction sanity check
+            if direction == "Up" and future_prices.max() < entry_price_actual:
+                mfe_direction_warnings += 1
+            elif direction == "Down" and future_prices.min() > entry_price_actual:
+                mfe_direction_warnings += 1
+            
+            # RR calculation
+            if mae_pct > 0:
+                rr_ratio = mfe_pct / mae_pct
+            elif mfe_pct > 0:
+                rr_ratio = np.inf
+            else:
+                rr_ratio = 0.0
+            
+            # Collect future debug (first 20)
+            if len(self._future_debug) < 20:
+                self._future_debug.append({
+                    "event": event_idx,
+                    "entry_idx": idx,
+                    "entry_price": round(entry_price_actual, 2),
+                    "direction": direction,
+                    "future_first": round(future_prices[0], 2),
+                    "future_last": round(future_prices[-1], 2),
+                    "future_max": round(future_prices.max(), 2),
+                    "future_min": round(future_prices.min(), 2),
+                    "future_len": len(future_prices)
+                })
+            
+            excursions.append({
+                "trend_id": ev['trend_id'],
+                "trend_direction": raw_direction,
+                "direction_normalized": direction,
+                "pullback_depth_pct": float(ev.get('pullback_depth_pct', 0)),
+                "pullback_duration": int(ev.get('pullback_duration', 0)),
+                "entry_price_actual": round(entry_price_actual, 2),
+                "entry_price_csv": round(entry_price_csv, 2),
+                "entry_idx": idx,
+                "price_match": abs(entry_price_actual - entry_price_csv) < 1e-8,
+                "outcome_008": ev.get('outcome', 'unknown'),
+                "mfe_pct": round(mfe_pct, 4),
+                "mae_pct": round(mae_pct, 4),
+                "rr_ratio": rr_ratio,
+                "mfe_bar": mfe_bar,
+                "mae_bar": mae_bar,
+                "mfe_price": round(mfe_price, 2),
+                "mae_price": round(mae_price, 2),
+                "future_first": round(future_prices[0], 2),
+                "future_last": round(future_prices[-1], 2),
+                "future_max": round(future_prices.max(), 2),
+                "future_min": round(future_prices.min(), 2),
+                "lookahead_bars_used": len(future_prices)
+            })
+        
+        if direction_warnings:
+            self.logger.warning(f"Unknown direction values: {direction_warnings}")
+        
+        if mfe_direction_warnings > 0:
+            self.logger.warning(
+                f"{mfe_direction_warnings} trades never moved in favorable direction"
+            )
+        
+        # Export future debug
+        if self._future_debug:
+            future_df = pd.DataFrame(self._future_debug)
+            self.result.artifacts["future_window_debug"] = future_df
+            
+            self.logger.info("\n  Future window sample (first 5):")
+            for _, d in future_df.head(5).iterrows():
+                self.logger.info(
+                    f"    Event {int(d['event']):3d}: entry={d['entry_price']:>10.2f}  "
+                    f"future=[{d['future_first']:>10.2f} ... {d['future_last']:>10.2f}]  "
+                    f"max={d['future_max']:>10.2f}  min={d['future_min']:>10.2f}  "
+                    f"dir={d['direction']}"
+                )
+        
+        self.excursions = pd.DataFrame(excursions, columns=EVENT_COLUMNS)
+        self.result.artifacts["excursion_events"] = self.excursions
+        
+        n = len(self.excursions)
+        
+        for dir_val in ["Up", "Down"]:
+            mask = self.excursions['direction_normalized'] == dir_val
+            subset = self.excursions[mask]
+            if len(subset) > 0:
+                self.logger.info(
+                    f"  {dir_val}: {len(subset):,} trades  "
+                    f"MFE={subset['mfe_pct'].mean():.2f}%  "
+                    f"MAE={subset['mae_pct'].mean():.2f}%"
+                )
+        
+        self.logger.metric("Events analyzed", f"{n:,}")
+        self.logger.metric("Mean MFE", f"{float(self.excursions['mfe_pct'].mean()):.2f}%")
+        self.logger.metric("Mean MAE", f"{float(self.excursions['mae_pct'].mean()):.2f}%")
+        
+        return {"events_analyzed": n}
+    
+    # ============================================================
+    # Step 4: Statistics (unchanged from v1.1)
+    # ============================================================
+    
+    def _statistics(self) -> Dict[str, Any]:
+        """Compute MFE/MAE statistics with robust RR percentiles"""
+        self.logger.info("Computing MFE/MAE statistics")
+        
+        if self.excursions is None or len(self.excursions) == 0:
+            stats = {"events_analyzed": 0}
+            for key, value in stats.items():
+                self.result.statistics[key] = value
+            return stats
+        
+        ex = self.excursions
+        n = len(ex)
+        
+        finite_rr = ex[ex['rr_ratio'] != np.inf]['rr_ratio']
+        infinite_rr_count = int((ex['rr_ratio'] == np.inf).sum())
+        
+        stats = {
+            "events_analyzed": n,
+            "invalid_events": len(self._invalid_events),
+            "price_mismatches": len(self._price_mismatches),
+            "direction_unknowns": len(self._direction_unknowns),
+            "mean_mfe": float(ex['mfe_pct'].mean()),
+            "median_mfe": float(ex['mfe_pct'].median()),
+            "std_mfe": float(ex['mfe_pct'].std()),
+            "max_mfe": float(ex['mfe_pct'].max()),
+            "mean_mae": float(ex['mae_pct'].mean()),
+            "median_mae": float(ex['mae_pct'].median()),
+            "std_mae": float(ex['mae_pct'].std()),
+            "max_mae": float(ex['mae_pct'].max()),
+            "infinite_rr_count": infinite_rr_count,
+            "infinite_rr_pct": round(infinite_rr_count / n * 100, 1) if n > 0 else 0,
+        }
+        
+        if len(finite_rr) > 0:
+            stats["mean_rr_finite"] = float(finite_rr.mean())
+            stats["median_rr"] = float(finite_rr.median())
+            stats["rr_p25"] = float(np.percentile(finite_rr, 25))
+            stats["rr_p75"] = float(np.percentile(finite_rr, 75))
+            stats["rr_p90"] = float(np.percentile(finite_rr, 90))
+            stats["rr_p95"] = float(np.percentile(finite_rr, 95))
+            stats["rr_p99"] = float(np.percentile(finite_rr, 99))
+        
+        for threshold in MFE_THRESHOLDS:
+            key = f"p_mfe_gt_{str(threshold).replace('.', '_')}"
+            stats[key] = round(float((ex['mfe_pct'] >= threshold).mean() * 100), 1)
+        
+        for threshold in MAE_THRESHOLDS:
+            key = f"p_mae_gt_{str(threshold).replace('.', '_')}"
+            stats[key] = round(float((ex['mae_pct'] >= threshold).mean() * 100), 1)
+        
+        for direction in ["Up", "Down"]:
+            mask = ex['direction_normalized'] == direction
+            subset = ex[mask]
+            if len(subset) > 0:
+                d = direction.lower()
+                stats[f"{d}_count"] = len(subset)
+                stats[f"{d}_mean_mfe"] = float(subset['mfe_pct'].mean())
+                stats[f"{d}_mean_mae"] = float(subset['mae_pct'].mean())
+        
+        # Distributions
+        ex['mfe_bin'] = pd.cut(ex['mfe_pct'], bins=MFE_DIST_BINS, labels=MFE_DIST_LABELS, right=False)
+        mfe_dist = ex['mfe_bin'].value_counts().sort_index()
+        mfe_dist_df = pd.DataFrame({"mfe_range": mfe_dist.index, "count": mfe_dist.values,
+                                     "pct": (mfe_dist.values / n * 100).round(1)})
+        self.result.artifacts["mfe_distribution"] = mfe_dist_df
+        
+        ex['mae_bin'] = pd.cut(ex['mae_pct'], bins=MAE_DIST_BINS, labels=MAE_DIST_LABELS, right=False)
+        mae_dist = ex['mae_bin'].value_counts().sort_index()
+        mae_dist_df = pd.DataFrame({"mae_range": mae_dist.index, "count": mae_dist.values,
+                                     "pct": (mae_dist.values / n * 100).round(1)})
+        self.result.artifacts["mae_distribution"] = mae_dist_df
+        
+        ex['rr_bin'] = pd.cut(ex['rr_ratio'].replace(np.inf, 999), bins=RR_DIST_BINS,
+                              labels=RR_DIST_LABELS, right=False)
+        rr_dist = ex['rr_bin'].value_counts().sort_index()
+        rr_dist_df = pd.DataFrame({"rr_range": rr_dist.index, "count": rr_dist.values,
+                                    "pct": (rr_dist.values / n * 100).round(1)})
+        if infinite_rr_count > 0:
+            inf_row = pd.DataFrame([{"rr_range": "∞ (no MAE)", "count": infinite_rr_count,
+                                      "pct": round(infinite_rr_count / n * 100, 1)}])
+            rr_dist_df = pd.concat([rr_dist_df, inf_row], ignore_index=True)
+        self.result.artifacts["reward_risk"] = rr_dist_df
+        
+        self.logger.info(f"\nMFE/MAE Statistics ({n:,} events):")
+        self.logger.info(f"  MFE: mean={stats['mean_mfe']:.2f}%, median={stats['median_mfe']:.2f}%")
+        self.logger.info(f"  MAE: mean={stats['mean_mae']:.2f}%, median={stats['median_mae']:.2f}%")
+        self.logger.info(f"  Validation: {stats['invalid_events']} invalid, "
+                        f"{stats['price_mismatches']} mismatches")
+        
+        if len(finite_rr) > 0:
+            self.logger.info(f"  RR: median={stats['median_rr']:.2f}, "
+                           f"P25={stats['rr_p25']:.2f}, P75={stats['rr_p75']:.2f}, "
+                           f"P90={stats['rr_p90']:.2f}, P95={stats['rr_p95']:.2f}")
+        
+        for key, value in stats.items():
+            self.result.statistics[key] = value
+        
+        return stats
+    
+    def compute(self) -> Dict[str, Any]:
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Phase 1 complete: MFE/MAE analysis finished")
+        return results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        self.output_dir = output_dir
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df: pd.DataFrame,
+                      dataset_id: str = "in_memory",
+                      output_dir: Optional[str] = None):
+        self.output_dir = output_dir
+        return super().run_dataframe(df, dataset_id, output_dir)

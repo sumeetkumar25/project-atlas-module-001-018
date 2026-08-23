@@ -1,0 +1,407 @@
+# atlas/modules/module002_volatility_persistence/module.py
+"""
+Module 002: Volatility Persistence Analysis - Phase 4
+Adds duration analysis to transition matrix estimation.
+
+Phase 1: Core calculations (returns, volatility)
+Phase 2: Regime classification (VL, L, M, H, E)
+Phase 3: Transition matrix (Markov probabilities)
+Phase 4: Duration analysis (regime persistence measurement)
+"""
+
+import numpy as np
+import pandas as pd
+import time
+from typing import Dict, Any, Optional
+from pathlib import Path
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.core.returns_utils import log_returns
+from atlas.core.statistics_utils import descriptive_stats
+from atlas.framework.protocol import ResearchProtocol, ModuleStatus, ModuleCategory
+from atlas.framework.registry import AtlasRegistry
+
+from .regime_engine import VolatilityRegimeEngine
+from .transition_engine import TransitionMatrixEngine
+from .duration_engine import DurationEngine
+from .constants import (
+    VOLATILITY_WINDOWS,
+    PRIMARY_WINDOW,
+    REGIME_LABELS,
+    REGIME_PERCENTILES
+)
+
+# Module metadata
+MODULE_INFO = {
+    "id": "002",
+    "title": "Volatility Persistence Analysis",
+    "author": "Project Atlas",
+    "version": "0.4.0-phase4",
+    "category": "Volatility Analysis",
+    "research_date": "2026-07-05",
+    "phase": "Phase 4 - Duration Analysis",
+    "requires": ["000", "001"],
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": [
+        "log_returns",
+        "absolute_returns",
+        "squared_returns",
+        "rolling_volatility",
+        "volatility_regimes",
+        "transition_matrix",
+        "duration_runs",
+        "duration_summary"
+    ],
+    "volatility_windows": VOLATILITY_WINDOWS,
+    "primary_window": PRIMARY_WINDOW,
+    "regime_labels": REGIME_LABELS,
+    "null_hypothesis": "H0: Volatility is independent through time"
+}
+
+
+class VolatilityPersistenceResearch(BaseResearchModule):
+    """
+    Module 002 Phase 4: Duration Analysis.
+    
+    Measures how long volatility remains in each regime.
+    Under H0 (independence), expected duration ≈ 1.25 periods.
+    Observed durations >> 1.25 indicate persistence.
+    """
+    
+    PROTOCOL = ResearchProtocol(
+        module_id="002",
+        module_name="Volatility Persistence Analysis",
+        category=ModuleCategory.VOLATILITY,
+        question="Is BTC volatility independent through time?",
+        hypothesis="H0: Volatility is independent through time. "
+                   "H1: Volatility exhibits persistence and clustering behavior.",
+        rationale="Volatility persistence affects position sizing, risk management, "
+                  "and forecasting horizon.",
+        methodology="Phase 1: Core Calculations\n"
+                   "Phase 2: Regime Classification\n"
+                   "Phase 3: Transition Matrix\n"
+                   "Phase 4: Duration Analysis\n"
+                   "  - Measure consecutive regime durations\n"
+                   "  - Compute mean/median/max duration per regime\n"
+                   "  - Compare to expected duration under independence",
+        statistics=[
+            "Log returns (Phase 1)",
+            "Rolling volatility (Phase 1)",
+            "Regime classifications (Phase 2)",
+            "Transition matrix (Phase 3)",
+            "Duration runs per regime (Phase 4)",
+            "Duration summary statistics (Phase 4)"
+        ],
+        depends_on=["000", "001"],
+        required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+        author="Project Atlas",
+        version="0.4.0-phase4",
+        status=ModuleStatus.PLANNED,
+        produces=[
+            "volatility_dataframe",
+            "regime_classifications",
+            "transition_matrix",
+            "duration_analysis"
+        ]
+    )
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(
+            module_name="VolatilityPersistence",
+            module_version="0.4.0-phase4"
+        )
+        self.registry = registry or AtlasRegistry()
+        
+        existing = self.registry.get_module("002")
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        
+        self._returns: Optional[pd.Series] = None
+        self._abs_returns: Optional[pd.Series] = None
+        self._sq_returns: Optional[pd.Series] = None
+        self._volatility_df: Optional[pd.DataFrame] = None
+        self._regime_engine: Optional[VolatilityRegimeEngine] = None
+        self._transition_engine: Optional[TransitionMatrixEngine] = None
+        self._duration_engine: Optional[DurationEngine] = None
+    
+    def _register_pipeline_steps(self):
+        self.pipeline_steps = [
+            # Phase 1
+            ('calculate_returns', self._calculate_returns),
+            ('calculate_absolute_returns', self._calculate_absolute_returns),
+            ('calculate_squared_returns', self._calculate_squared_returns),
+            ('calculate_rolling_volatility', self._calculate_rolling_volatility),
+            ('calculate_window_metadata', self._calculate_window_metadata),
+            # Phase 2
+            ('calculate_regimes', self._calculate_regimes),
+            # Phase 3
+            ('calculate_transition_matrix', self._calculate_transition_matrix),
+            # Phase 4
+            ('calculate_duration_statistics', self._calculate_duration_statistics),
+        ]
+    
+    # ============================================================
+    # Phase 1 Methods (unchanged)
+    # ============================================================
+    
+    def _calculate_returns(self) -> Dict[str, Any]:
+        self.logger.info("Calculating log returns from close prices")
+        returns = log_returns(self.df['close']).dropna()
+        self._returns = returns
+        stats = descriptive_stats(returns)
+        self.logger.metric("Return observations", f"{len(returns):,}")
+        return {
+            'return_observations': len(returns),
+            'return_mean': stats['mean'],
+            'return_std': stats['std'],
+            'return_min': stats['min'],
+            'return_max': stats['max']
+        }
+    
+    def _calculate_absolute_returns(self) -> Dict[str, Any]:
+        self.logger.info("Calculating absolute returns |r|")
+        abs_returns = np.abs(self._returns)
+        stats = descriptive_stats(abs_returns)
+        self._abs_returns = abs_returns
+        return {
+            'abs_return_mean': stats['mean'],
+            'abs_return_median': stats['median'],
+            'abs_return_std': stats['std'],
+            'abs_return_max': stats['max']
+        }
+    
+    def _calculate_squared_returns(self) -> Dict[str, Any]:
+        self.logger.info("Calculating squared returns r²")
+        sq_returns = self._returns ** 2
+        stats = descriptive_stats(sq_returns)
+        self._sq_returns = sq_returns
+        return {
+            'sq_return_mean': stats['mean'],
+            'sq_return_median': stats['median'],
+            'sq_return_max': stats['max']
+        }
+    
+    def _calculate_rolling_volatility(self) -> Dict[str, Any]:
+        self.logger.info(f"Calculating rolling volatility for windows: {VOLATILITY_WINDOWS}")
+        vol_df = pd.DataFrame(index=self._returns.index)
+        if 'timestamp' in self.df.columns:
+            vol_df['timestamp'] = self.df['timestamp'].iloc[1:].values
+        vol_df['log_return'] = self._returns.values
+        vol_df['abs_return'] = self._abs_returns.values
+        vol_df['squared_return'] = self._sq_returns.values
+        
+        vol_stats = {}
+        for window in VOLATILITY_WINDOWS:
+            col_name = f'vol_{window}'
+            rolling_vol = self._returns.rolling(window=window).std()
+            vol_df[col_name] = rolling_vol.values
+            valid_vol = rolling_vol.dropna()
+            vol_desc = descriptive_stats(valid_vol)
+            cv = valid_vol.std() / valid_vol.mean() if valid_vol.mean() != 0 else np.nan
+            vol_stats[f'vol_{window}_mean'] = vol_desc['mean']
+            vol_stats[f'vol_{window}_std'] = vol_desc['std']
+            vol_stats[f'vol_{window}_cv'] = cv
+            vol_stats[f'vol_{window}_observations'] = len(valid_vol)
+        
+        self._volatility_df = vol_df
+        self.result.add_artifact('volatility_dataframe', vol_df)
+        return vol_stats
+    
+    def _calculate_window_metadata(self) -> Dict[str, Any]:
+        self.logger.info("Calculating window metadata")
+        metadata = {}
+        total_rows = len(self._volatility_df)
+        for window in VOLATILITY_WINDOWS:
+            col = f'vol_{window}'
+            valid_vol = self._volatility_df[col].dropna()
+            nan_count = total_rows - len(valid_vol)
+            effective_pct = (len(valid_vol) / total_rows * 100) if total_rows > 0 else 0
+            metadata[f'window_{window}_size'] = window
+            metadata[f'window_{window}_nan_count'] = nan_count
+            metadata[f'window_{window}_effective_samples'] = len(valid_vol)
+            metadata[f'window_{window}_data_retention_pct'] = round(effective_pct, 2)
+        return metadata
+    
+    # ============================================================
+    # Phase 2 Methods (unchanged)
+    # ============================================================
+    
+    def _calculate_regimes(self) -> Dict[str, Any]:
+        self.logger.info("Classifying volatility regimes")
+        self._regime_engine = VolatilityRegimeEngine(labels=REGIME_LABELS, percentiles=REGIME_PERCENTILES)
+        vol_series = self._volatility_df[f"vol_{PRIMARY_WINDOW}"]
+        regime_df = self._regime_engine.classify(vol_series)
+        
+        self._volatility_df["volatility_percentile"] = regime_df["volatility_percentile"]
+        self._volatility_df["regime"] = regime_df["regime"]
+        self._volatility_df["regime_id"] = self._volatility_df["regime"].cat.codes.replace(-1, np.nan)
+        
+        valid_regimes = self._volatility_df["regime"].dropna()
+        counts = valid_regimes.value_counts().sort_index()
+        stats = {'regime_classified_count': len(valid_regimes)}
+        
+        for label in REGIME_LABELS:
+            count = int(counts.get(label, 0))
+            pct = count / len(valid_regimes) * 100 if len(valid_regimes) > 0 else 0
+            stats[f"{label}_count"] = count
+            stats[f"{label}_pct"] = round(pct, 2)
+        
+        regime_cols = ["timestamp", f"vol_{PRIMARY_WINDOW}", "volatility_percentile", "regime", "regime_id"]
+        self.result.add_artifact("regime_dataframe", self._volatility_df[regime_cols].copy())
+        return stats
+    
+    # ============================================================
+    # Phase 3 Methods (unchanged)
+    # ============================================================
+    
+    def _calculate_transition_matrix(self) -> Dict[str, Any]:
+        self.logger.info("Building transition matrix")
+        self._transition_engine = TransitionMatrixEngine(labels=REGIME_LABELS)
+        counts, probability, sequence = self._transition_engine.build(self._volatility_df["regime"])
+        
+        self.result.add_artifact("transition_counts", counts)
+        self.result.add_artifact("transition_probability", probability)
+        self.result.add_artifact("transition_sequence", sequence)
+        
+        stats = {}
+        total = counts.values.sum()
+        stats["total_transitions"] = int(total)
+        
+        for frm in REGIME_LABELS:
+            for to in REGIME_LABELS:
+                stats[f"{frm}_{to}_count"] = int(counts.loc[frm, to])
+                stats[f"{frm}_{to}_prob"] = float(probability.loc[frm, to])
+        
+        diagonal_total = sum(counts.loc[l, l] for l in REGIME_LABELS)
+        stats["overall_persistence"] = float(diagonal_total / total) if total > 0 else 0.0
+        
+        return stats
+    
+    # ============================================================
+    # Phase 4: Duration Analysis
+    # ============================================================
+    
+    def _calculate_duration_statistics(self) -> Dict[str, Any]:
+        """
+        Step 8: Calculate regime duration statistics.
+        
+        Measures how long volatility remains in each regime
+        before transitioning to another regime.
+        
+        Under H0 (independence), expected mean duration ≈ 1.25 periods.
+        Observed durations significantly larger indicate persistence.
+        """
+        self.logger.info("Calculating regime durations")
+        
+        self._duration_engine = DurationEngine(labels=REGIME_LABELS)
+        
+        runs, summary = self._duration_engine.build(
+            self._volatility_df["regime"]
+        )
+        
+        # Store artifacts
+        self.result.add_artifact("duration_runs", runs)
+        self.result.add_artifact("duration_summary", summary)
+        
+        # Display summary
+        self.logger.info("\n" + self._duration_engine.summary(summary))
+        
+        # Build statistics
+        stats = {}
+        
+        for _, row in summary.iterrows():
+            regime = row["regime"]
+            stats[f"{regime}_mean_duration"] = float(row["mean_duration"]) if not pd.isna(row["mean_duration"]) else 0.0
+            stats[f"{regime}_median_duration"] = float(row["median_duration"]) if not pd.isna(row["median_duration"]) else 0.0
+            stats[f"{regime}_max_duration"] = int(row["max_duration"]) if not pd.isna(row["max_duration"]) else 0
+            stats[f"{regime}_min_duration"] = int(row["min_duration"]) if not pd.isna(row["min_duration"]) else 0
+            stats[f"{regime}_runs"] = int(row["runs"])
+            stats[f"{regime}_total_observations"] = int(row["total_observations"]) if not pd.isna(row["total_observations"]) else 0
+        
+        # Overall statistics
+        total_runs = summary['runs'].sum()
+        total_duration = summary['total_observations'].sum()
+        stats['total_regime_runs'] = int(total_runs)
+        stats['total_duration_observations'] = int(total_duration)
+        
+        # Overall mean duration
+        if len(runs) > 0:
+            stats['overall_mean_duration'] = float(runs['duration'].mean())
+            stats['overall_median_duration'] = float(runs['duration'].median())
+            stats['overall_max_duration'] = int(runs['duration'].max())
+        
+        # Expected under independence
+        expected = self._duration_engine.get_expected_duration_under_independence(len(REGIME_LABELS))
+        stats['expected_duration_under_h0'] = expected
+        
+        # Evidence assessment
+        if stats.get('overall_mean_duration', 0) > expected * 1.5:
+            self.logger.info(
+                f"\nObserved mean duration ({stats['overall_mean_duration']:.2f}) "
+                f">> expected under H0 ({expected:.2f})"
+            )
+            self.logger.info("Evidence AGAINST H0 - volatility regimes are persistent")
+        else:
+            self.logger.info(
+                f"\nObserved mean duration ({stats.get('overall_mean_duration', 0):.2f}) "
+                f"~ expected under H0 ({expected:.2f})"
+            )
+        
+        return stats
+    
+    # ============================================================
+    # EXPORT
+    # ============================================================
+    
+    def export(self, output_dir: str) -> None:
+        """Export all Phase 1-4 artifacts as CSV files"""
+        start_time = time.time()
+        self.logger.section("Exporting Results")
+        
+        from atlas.core.export_manager import ExportManager
+        exporter = ExportManager(output_dir)
+        
+        # Standard exports
+        exporter.export_statistics(self.result)
+        exporter.export_report(self.result)
+        
+        # Phase 1
+        if 'volatility_dataframe' in self.result.artifacts:
+            exporter.export_dataframe(self.result.artifacts['volatility_dataframe'], "volatility_data.csv")
+        
+        # Phase 2
+        if 'regime_dataframe' in self.result.artifacts:
+            exporter.export_dataframe(self.result.artifacts['regime_dataframe'], "volatility_regimes.csv")
+        
+        # Phase 3
+        if 'transition_counts' in self.result.artifacts:
+            exporter.export_dataframe(self.result.artifacts['transition_counts'], "transition_counts.csv")
+        if 'transition_probability' in self.result.artifacts:
+            exporter.export_dataframe(self.result.artifacts['transition_probability'].round(4), "transition_probability.csv")
+        if 'transition_sequence' in self.result.artifacts:
+            exporter.export_dataframe(self.result.artifacts['transition_sequence'], "transition_sequence.csv")
+        
+        # Phase 4
+        if 'duration_runs' in self.result.artifacts:
+            exporter.export_dataframe(self.result.artifacts['duration_runs'], "duration_runs.csv")
+        if 'duration_summary' in self.result.artifacts:
+            exporter.export_dataframe(self.result.artifacts['duration_summary'], "duration_summary.csv")
+        
+        self.result.add_timing('export', time.time() - start_time)
+        self.logger.success(f"All files exported to: {output_dir}")
+    
+    def compute(self) -> Dict[str, Any]:
+        all_results = {}
+        for step_name, step_func in self.pipeline_steps:
+            self.logger.info(f"Step: {step_name}")
+            step_result = step_func()
+            all_results.update(step_result)
+        
+        if self._volatility_df is not None:
+            all_results['phase4_complete'] = True
+        
+        self.logger.success("Phase 4 complete")
+        return all_results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        return super().run(filepath, output_dir)

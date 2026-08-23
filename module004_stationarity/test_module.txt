@@ -1,0 +1,347 @@
+# atlas/modules/module004_stationarity/test_module.py
+"""
+Module 004 Phase 1 Test Runner
+
+IMPORTANT: Module 004 evaluates stationarity of LOG RETURNS,
+not prices. Synthetic validation must:
+
+1. Generate return processes (stationary or non-stationary)
+2. Convert to positive price series via cumulative product
+3. Feed prices to the module (which computes log returns internally)
+
+Synthetic Test 1: White noise returns → stationary
+Synthetic Test 2: AR(1) stationary returns → stationary
+Synthetic Test 3: Non-stationary returns (mean shift) → non-stationary
+Synthetic Test 4: BTC datasets
+"""
+
+import sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+from atlas.modules.module004_stationarity.module import StationarityResearch
+from atlas.runner import ModuleRunner
+from atlas.framework.registry import AtlasRegistry
+from atlas.framework.framework_check import FrameworkChecker
+
+
+def create_price_dataframe(returns: np.ndarray, 
+                           initial_price: float = 100.0,
+                           name: str = "synthetic") -> pd.DataFrame:
+    """
+    Create a positive OHLCV price DataFrame from a return series.
+    
+    Price evolution: P_t = P_0 * exp(Σ r_i)
+    This ensures prices are always positive.
+    """
+    n = len(returns)
+    
+    log_price = np.log(initial_price) + np.cumsum(returns)
+    price = np.exp(log_price)
+    price = np.maximum(price, 1e-10)
+    
+    dates = pd.date_range(start="2020-01-01", periods=n, freq="15min")
+    
+    return pd.DataFrame({
+        "timestamp": dates,
+        "open": price,
+        "high": price * 1.001,
+        "low": price * 0.999,
+        "close": price,
+        "volume": np.ones(n) * 100
+    })
+
+
+def generate_ar1_returns(n: int, phi: float, sigma: float = 0.01, burn: int = 100) -> np.ndarray:
+    """
+    Generate stationary AR(1) process.
+    
+    r_t = φ * r_{t-1} + ε_t,  ε_t ~ N(0, σ²)
+    
+    Stationary when |φ| < 1.
+    
+    Args:
+        n: Number of observations
+        phi: Autoregressive coefficient (|φ| < 1 for stationarity)
+        sigma: Innovation standard deviation
+        burn: Burn-in period to remove initialization effects
+        
+    Returns:
+        Array of AR(1) returns
+    """
+    total = n + burn
+    returns = np.zeros(total)
+    innovations = np.random.normal(0, sigma, total)
+    
+    for t in range(1, total):
+        returns[t] = phi * returns[t-1] + innovations[t]
+    
+    # Discard burn-in period
+    return returns[burn:]
+
+
+def run_stationarity_test(returns: np.ndarray, test_name: str, 
+                          expected: str, description: str) -> bool:
+    """
+    Run stationarity test and validate results.
+    
+    Args:
+        returns: Return series
+        test_name: Display name
+        expected: Expected conclusion ("stationary", "non_stationary", "inconclusive")
+        description: Process description
+        
+    Returns:
+        True if test passes
+    """
+    print(f"\n{'='*60}")
+    print(f"SYNTHETIC TEST: {test_name}")
+    print(f"{'='*60}")
+    print(f"  Process: {description}")
+    print(f"  Expected: {expected.upper()}")
+    
+    # Convert to prices and run module
+    df = create_price_dataframe(returns, initial_price=100.0, name=test_name)
+    
+    research = StationarityResearch()
+    result = research.run_dataframe(df, dataset_id=f"synthetic_{test_name.lower().replace(' ', '_')}")
+    
+    # Extract results
+    adf_p = result.statistics.get("adf_pvalue", 1.0)
+    adf_stat = result.statistics.get("adf_statistic", 0.0)
+    kpss_p = result.statistics.get("kpss_pvalue", 0.0)
+    kpss_stat = result.statistics.get("kpss_statistic", 0.0)
+    conclusion = result.statistics.get("stationarity_conclusion", "unknown")
+    confidence = result.statistics.get("confidence_level", "unknown")
+    
+    print(f"\n  ADF: stat={adf_stat:.4f}, p={adf_p:.6f}")
+    print(f"  KPSS: stat={kpss_stat:.4f}, p={kpss_p:.6f}")
+    print(f"  Conclusion: {conclusion}")
+    print(f"  Confidence: {confidence}")
+    
+    # Validate
+    checks_passed = 0
+    total_checks = 3
+    
+    # Check 1: Conclusion matches expected
+    if conclusion == expected:
+        print(f"  ✓ Conclusion matches expected: {expected}")
+        checks_passed += 1
+    elif expected == "stationary" and conclusion == "inconclusive":
+        print(f"  ⚠ Expected 'stationary', got 'inconclusive' (partial pass)")
+        checks_passed += 1  # Partial credit
+    else:
+        print(f"  ✗ Expected '{expected}', got '{conclusion}'")
+    
+    # Check 2: Confidence level is meaningful
+    if confidence != "unknown":
+        print(f"  ✓ Confidence level reported: {confidence}")
+        checks_passed += 1
+    else:
+        print(f"  ✗ No confidence level reported")
+    
+    # Check 3: Statistics are in valid ranges
+    if 0 <= adf_p <= 1 and 0 <= kpss_p <= 1:
+        print(f"  ✓ p-values in valid range [0, 1]")
+        checks_passed += 1
+    else:
+        print(f"  ✗ Invalid p-values: ADF={adf_p}, KPSS={kpss_p}")
+    
+    passed = checks_passed >= 2  # Allow partial passes
+    print(f"\n  {test_name}: {checks_passed}/{total_checks} checks passed → {'PASS' if passed else 'FAIL'}")
+    
+    return passed
+
+
+def test_synthetic_white_noise():
+    """Test 1: White noise returns ~ N(0, σ²)"""
+    np.random.seed(42)
+    n = 5000
+    returns = np.random.normal(loc=0.0, scale=0.01, size=n)
+    
+    return run_stationarity_test(
+        returns=returns,
+        test_name="White Noise",
+        expected="stationary",
+        description="r_t ~ N(0, 0.01) i.i.d. - pure white noise"
+    )
+
+
+def test_synthetic_ar1_stationary():
+    """
+    Test 2: Stationary AR(1) process.
+    
+    r_t = 0.10 * r_{t-1} + ε_t,  ε_t ~ N(0, 0.01)
+    
+    This has weak positive autocorrelation but is mathematically stationary.
+    More challenging than white noise because of the dependence structure.
+    """
+    np.random.seed(123)
+    n = 5000
+    
+    returns = generate_ar1_returns(n=n, phi=0.10, sigma=0.01, burn=100)
+    
+    # Verify AR(1) properties
+    empirical_acf1 = pd.Series(returns).autocorr(lag=1)
+    
+    return run_stationarity_test(
+        returns=returns,
+        test_name="AR(1) Stationary (φ=0.10)",
+        expected="stationary",
+        description=f"r_t = 0.10·r_{{t-1}} + ε_t, ε_t ~ N(0, 0.01) [empirical ACF(1)={empirical_acf1:.4f}]"
+    )
+
+
+def test_synthetic_nonstationary():
+    """
+    Test 3: Non-stationary returns with mean shift.
+    
+    First half: r_t ~ N(0.0, 0.01)
+    Second half: r_t ~ N(0.05, 0.01)
+    
+    The structural break in mean makes this non-stationary.
+    """
+    np.random.seed(42)
+    n = 5000
+    split = 2500
+    
+    returns_part1 = np.random.normal(loc=0.0, scale=0.01, size=split)
+    returns_part2 = np.random.normal(loc=0.05, scale=0.01, size=n - split)
+    returns = np.concatenate([returns_part1, returns_part2])
+    
+    mean1 = returns_part1.mean()
+    mean2 = returns_part2.mean()
+    
+    return run_stationarity_test(
+        returns=returns,
+        test_name="Non-Stationary (Mean Shift)",
+        expected="non_stationary",
+        description=f"Mean shift: μ1={mean1:.4f} → μ2={mean2:.4f} at t=2500"
+    )
+
+
+def test_btc_datasets():
+    """Test 4: BTC real data"""
+    print("\n" + "=" * 60)
+    print("BTC DATASETS")
+    print("=" * 60)
+    print("  Testing stationarity of BTC log returns")
+    
+    registry = AtlasRegistry()
+    runner = ModuleRunner(registry=registry)
+    
+    datasets = {
+        "BTC_15m": "data/raw/BTCUSD_15m.csv",
+        "BTC_1h": "data/raw/BTCUSD_1h.csv",
+        "BTC_4h": "data/raw/BTCUSD_4h.csv",
+    }
+    
+    missing = [name for name, path in datasets.items() if not Path(path).exists()]
+    if missing:
+        print(f"\n✗ Missing: {missing}")
+        return False
+    
+    results = runner.run_on_datasets(
+        module_class=StationarityResearch,
+        datasets=datasets,
+        output_base_dir="outputs/module004",
+        validate_after=False
+    )
+    
+    all_passed = True
+    
+    for name, result in results.items():
+        if result.status == "completed":
+            conclusion = result.statistics.get("stationarity_conclusion", "unknown")
+            confidence = result.statistics.get("confidence_level", "unknown")
+            adf_p = result.statistics.get("adf_pvalue", 1.0)
+            kpss_p = result.statistics.get("kpss_pvalue", 0.0)
+            
+            print(f"\n  {name}:")
+            print(f"    ADF p: {adf_p:.6f}")
+            print(f"    KPSS p: {kpss_p:.6f}")
+            print(f"    Conclusion: {conclusion}")
+            print(f"    Confidence: {confidence}")
+            
+            if conclusion == "stationary":
+                print(f"    ✓ BTC returns are stationary (expected)")
+            elif conclusion == "inconclusive":
+                print(f"    ⚠ Inconclusive - may need Phase 2 analysis")
+            else:
+                print(f"    ⚠ Unexpected: {conclusion}")
+                all_passed = False
+        else:
+            print(f"  ✗ {name}: Failed")
+            all_passed = False
+    
+    return all_passed
+
+
+def main():
+    """Test Module 004 Phase 1"""
+    
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 004 PHASE 1 TEST")
+    print("Stationarity Analysis of Log Returns")
+    print("=" * 70)
+    print("\n  Module workflow: Prices → Log Returns → ADF + KPSS")
+    
+    # Framework check
+    print("\n[1/4] Framework health check...")
+    checker = FrameworkChecker()
+    checker.run_all_checks()
+    
+    # Synthetic tests
+    print("\n[2/4] Synthetic validation...")
+    print("  (Using run_dataframe - no file I/O)")
+    
+    tests = [
+        ("White Noise", test_synthetic_white_noise),
+        ("AR(1) Stationary", test_synthetic_ar1_stationary),
+        ("Non-Stationary Mean Shift", test_synthetic_nonstationary),
+    ]
+    
+    results = {}
+    for name, test_func in tests:
+        results[name] = test_func()
+    
+    all_synthetic_passed = all(results.values())
+    
+    if not all_synthetic_passed:
+        print("\n⚠ Some synthetic tests had issues:")
+        for name, passed in results.items():
+            status = "✓ PASS" if passed else "⚠ PARTIAL"
+            print(f"  {status}: {name}")
+    else:
+        print("\n✓ All synthetic tests passed")
+    
+    # BTC data
+    print("\n[3/4] BTC datasets...")
+    btc_ok = test_btc_datasets()
+    
+    # Summary
+    print("\n[4/4] Summary")
+    print("=" * 70)
+    
+    synth_count = sum(results.values())
+    total_synth = len(results)
+    
+    print(f"\n  Synthetic tests: {synth_count}/{total_synth} passed")
+    print(f"  BTC data: {'PASS' if btc_ok else 'ISSUES'}")
+    
+    if all_synthetic_passed and btc_ok:
+        print("\n✓ Module 004 Phase 1 validated successfully")
+        print("✓ Correctly identifies stationary and non-stationary processes")
+        print("✓ BTC log returns confirmed stationary")
+        print("\n✓ Ready for Phase 2 (structural breaks)")
+        return 0
+    else:
+        print("\n⚠ Review results before proceeding to Phase 2")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

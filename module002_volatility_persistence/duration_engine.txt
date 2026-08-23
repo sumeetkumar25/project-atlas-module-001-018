@@ -1,0 +1,200 @@
+# atlas/modules/module002_volatility_persistence/duration_engine.py
+"""
+Duration Engine - Phase 4
+
+Measures consecutive regime durations.
+Analyzes how long volatility remains in each regime before transitioning.
+
+Key insight: If volatility is persistent, mean durations will be
+significantly greater than 1 (immediate transition).
+"""
+
+from collections import defaultdict
+import pandas as pd
+import numpy as np
+from typing import Tuple, List
+
+
+class DurationEngine:
+    """
+    Measures consecutive regime durations.
+    
+    For each regime (VL, L, M, H, E), tracks how many consecutive
+    observations remain in that regime before transitioning.
+    
+    Example output:
+    Regime  Runs  Mean_Duration  Median_Duration  Max_Duration
+    VL      5000   4.5            3                45
+    L       8000   3.2            2                28
+    M       10000  2.1            1                15
+    H       6000   2.8            2                22
+    E       4000   3.9            3                38
+    
+    Interpretation:
+    - Higher mean duration = more persistent regime
+    - VL and E typically have highest durations (extreme persistence)
+    - M typically has lowest duration (transition zone)
+    """
+    
+    def __init__(self, labels: List[str]):
+        """
+        Initialize duration engine.
+        
+        Args:
+            labels: Ordered list of regime labels (e.g., ["VL", "L", "M", "H", "E"])
+        """
+        self.labels = labels
+    
+    def build(self, regime_series: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Build duration statistics from regime series.
+        
+        Args:
+            regime_series: Series containing regime labels
+                          May contain NaN values which are excluded.
+        
+        Returns:
+            Tuple of:
+            - runs_df: DataFrame with each regime run (regime, duration)
+            - summary_df: DataFrame with summary statistics per regime
+        """
+        # Remove NaN and reset index
+        clean = regime_series.dropna().reset_index(drop=True)
+        
+        if len(clean) == 0:
+            raise ValueError("No valid regime observations")
+        
+        # Track durations for each regime
+        durations = defaultdict(list)
+        
+        # Track first regime
+        current = clean.iloc[0]
+        length = 1
+        records = []
+        
+        # Iterate through remaining observations
+        for regime in clean.iloc[1:]:
+            if regime == current:
+                # Same regime continues
+                length += 1
+            else:
+                # Regime changed - record the completed run
+                durations[current].append(length)
+                records.append({
+                    "regime": current,
+                    "duration": length
+                })
+                
+                # Start new run
+                current = regime
+                length = 1
+        
+        # Record the final run
+        durations[current].append(length)
+        records.append({
+            "regime": current,
+            "duration": length
+        })
+        
+        # Build summary statistics for each regime
+        summary = []
+        
+        for regime in self.labels:
+            values = durations.get(regime, [])
+            
+            if len(values) == 0:
+                # Regime never occurred
+                summary.append({
+                    "regime": regime,
+                    "runs": 0,
+                    "mean_duration": np.nan,
+                    "median_duration": np.nan,
+                    "std_duration": np.nan,
+                    "min_duration": np.nan,
+                    "max_duration": np.nan,
+                    "total_observations": 0
+                })
+                continue
+            
+            arr = np.asarray(values, dtype=float)
+            
+            summary.append({
+                "regime": regime,
+                "runs": len(arr),
+                "mean_duration": arr.mean(),
+                "median_duration": float(np.median(arr)),
+                "std_duration": float(arr.std(ddof=1)) if len(arr) > 1 else 0.0,
+                "min_duration": int(arr.min()),
+                "max_duration": int(arr.max()),
+                "total_observations": int(arr.sum())
+            })
+        
+        return (
+            pd.DataFrame(records),
+            pd.DataFrame(summary)
+        )
+    
+    def get_expected_duration_under_independence(self, n_regimes: int) -> float:
+        """
+        Calculate expected duration if regimes were independent.
+        
+        Under independence with equal regime probabilities:
+        Expected duration = 1 / (1 - p) where p = 1/n_regimes
+        
+        For 5 regimes: expected = 1 / (1 - 0.2) = 1.25
+        
+        Args:
+            n_regimes: Number of regimes
+            
+        Returns:
+            Expected mean duration under H0
+        """
+        p = 1.0 / n_regimes
+        return 1.0 / (1.0 - p)
+    
+    def summary(self, summary_df: pd.DataFrame) -> str:
+        """
+        Generate human-readable duration summary.
+        
+        Args:
+            summary_df: Summary DataFrame from build()
+            
+        Returns:
+            Formatted string
+        """
+        lines = []
+        lines.append("Regime Duration Analysis:")
+        lines.append("")
+        lines.append(f"{'Regime':<8} {'Runs':>8} {'Mean':>10} {'Median':>10} {'Max':>8} {'Total':>10}")
+        lines.append("-" * 60)
+        
+        for _, row in summary_df.iterrows():
+            regime = row['regime']
+            runs = row['runs']
+            
+            if runs == 0:
+                lines.append(f"{regime:<8} {'--':>8} {'--':>10} {'--':>10} {'--':>8} {'--':>10}")
+            else:
+                lines.append(
+                    f"{regime:<8} {int(runs):>8} "
+                    f"{row['mean_duration']:>10.2f} "
+                    f"{row['median_duration']:>10.1f} "
+                    f"{int(row['max_duration']):>8} "
+                    f"{int(row['total_observations']):>10,}"
+                )
+        
+        # Expected under independence
+        expected = self.get_expected_duration_under_independence(len(self.labels))
+        lines.append("")
+        lines.append(f"Expected mean duration under H0 (independence): {expected:.2f}")
+        
+        # Interpretation
+        overall_mean = summary_df[summary_df['runs'] > 0]['mean_duration'].mean()
+        if overall_mean > expected * 1.5:
+            lines.append(f"Observed overall mean ({overall_mean:.2f}) >> expected ({expected:.2f})")
+            lines.append("Evidence AGAINST H0 - volatility is persistent")
+        else:
+            lines.append(f"Observed overall mean ({overall_mean:.2f}) ~ expected ({expected:.2f})")
+            lines.append("Cannot strongly reject H0")
+        
+        return "\n".join(lines)

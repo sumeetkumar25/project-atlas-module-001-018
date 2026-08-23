@@ -1,0 +1,248 @@
+# atlas/modules/module006_volatility_clustering/module.py
+"""
+Module 006: Volatility Clustering Analysis - Phase 1
+
+Measures volatility and its time-varying behavior.
+Phase 1: Volatility measurement and rolling statistics.
+Phase 2: Clustering tests (autocorrelation of volatility, ARCH effects).
+
+Uses execute_pipeline() from BaseResearchModule.
+"""
+
+from typing import Dict, Any, Optional
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.core.returns_utils import log_returns
+from atlas.framework.protocol import ResearchProtocol, ModuleStatus, ModuleCategory
+from atlas.framework.registry import AtlasRegistry
+
+from .config import (
+    MODULE_ID,
+    MODULE_NAME,
+    MODULE_VERSION,
+    VOLATILITY_WINDOWS,
+    DEFAULT_WINDOW
+)
+from .protocol import PROTOCOL
+
+MODULE_INFO = {
+    "id": MODULE_ID,
+    "name": MODULE_NAME,
+    "version": MODULE_VERSION,
+    "author": "Project Atlas",
+    "phase": "Phase 1 - Volatility Measurement",
+    "requires": ["000", "001"],
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": [
+        "volatility_proxies",
+        "rolling_volatility",
+        "volatility_statistics"
+    ]
+}
+
+
+class VolatilityClusteringResearch(BaseResearchModule):
+    """
+    Module 006: Volatility Clustering Analysis - Phase 1
+    
+    Research Question: Does BTC exhibit volatility clustering?
+    
+    Phase 1: Measures volatility proxies and rolling statistics.
+    Phase 2 will test for clustering using autocorrelation tests.
+    """
+    
+    PROTOCOL = ResearchProtocol(
+        module_id=MODULE_ID,
+        module_name=MODULE_NAME,
+        category=ModuleCategory.VOLATILITY,
+        question=PROTOCOL["research_question"],
+        hypothesis=PROTOCOL["null_hypothesis"],
+        rationale=PROTOCOL["rationale"],
+        methodology=PROTOCOL["methodology"],
+        statistics=PROTOCOL["statistics"],
+        depends_on=["000", "001"],
+        required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+        author="Project Atlas",
+        version=MODULE_VERSION,
+        status=ModuleStatus.PLANNED,
+        produces=["volatility_series", "rolling_volatility"]
+    )
+    
+    MODULE_INFO = MODULE_INFO
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(
+            module_name=MODULE_NAME,
+            module_version=MODULE_VERSION
+        )
+        self.registry = registry or AtlasRegistry()
+        
+        existing = self.registry.get_module(MODULE_ID)
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        
+        self.returns: Optional[pd.Series] = None
+        self.abs_returns: Optional[pd.Series] = None
+        self.squared_returns: Optional[pd.Series] = None
+        self.rolling_volatility: Optional[pd.DataFrame] = None
+    
+    def _register_pipeline_steps(self):
+        """Register Phase 1 computation steps"""
+        self.pipeline_steps = [
+            ("returns", self._calculate_returns),
+            ("volatility", self._calculate_volatility),
+            ("rolling_volatility", self._rolling_volatility),
+            ("summary", self._summary),
+        ]
+    
+    # ============================================================
+    # Step 1: Calculate Returns
+    # ============================================================
+    
+    def _calculate_returns(self) -> Dict[str, Any]:
+        """Calculate log returns using shared Atlas utility"""
+        self.logger.info("Calculating log returns")
+        
+        self.returns = log_returns(self.df["close"])
+        
+        self.logger.metric("Return count", f"{len(self.returns):,}")
+        self.logger.metric("Mean return", f"{self.returns.mean():.8f}")
+        self.logger.metric("Std return", f"{self.returns.std():.8f}")
+        
+        return {
+            "return_count": len(self.returns),
+            "return_mean": float(self.returns.mean()),
+            "return_std": float(self.returns.std())
+        }
+    
+    # ============================================================
+    # Step 2: Volatility Proxies
+    # ============================================================
+    
+    def _calculate_volatility(self) -> Dict[str, Any]:
+        """
+        Compute volatility proxies.
+        
+        - Absolute returns |r|: Linear measure of volatility
+        - Squared returns r²: Quadratic measure (emphasizes large moves)
+        
+        These are the foundation for volatility clustering tests in Phase 2.
+        """
+        self.logger.info("Computing volatility proxies")
+        
+        self.abs_returns = self.returns.abs()
+        self.squared_returns = self.returns ** 2
+        
+        self.logger.metric("Mean |r|", f"{self.abs_returns.mean():.8f}")
+        self.logger.metric("Mean r²", f"{self.squared_returns.mean():.10f}")
+        self.logger.metric("Max |r|", f"{self.abs_returns.max():.6f}")
+        self.logger.metric("Max r²", f"{self.squared_returns.max():.10f}")
+        
+        return {
+            "mean_abs_return": float(self.abs_returns.mean()),
+            "mean_squared_return": float(self.squared_returns.mean()),
+            "max_abs_return": float(self.abs_returns.max()),
+            "max_squared_return": float(self.squared_returns.max())
+        }
+    
+    # ============================================================
+    # Step 3: Rolling Volatility
+    # ============================================================
+    
+    def _rolling_volatility(self) -> Dict[str, Any]:
+        """
+        Calculate rolling volatility for multiple windows.
+        
+        Rolling volatility reveals time-varying nature of risk.
+        If volatility clusters, rolling estimates will show persistent
+        periods of high and low values.
+        """
+        self.logger.info(f"Computing rolling volatility (windows: {VOLATILITY_WINDOWS})")
+        
+        df = pd.DataFrame()
+        df["timestamp"] = self.df.loc[self.returns.index, "timestamp"]
+        
+        # Add volatility proxies
+        df["abs_return"] = self.abs_returns.values
+        df["squared_return"] = self.squared_returns.values
+        
+        # Rolling standard deviation for each window
+        stats = {}
+        for window in VOLATILITY_WINDOWS:
+            col = f"vol_{window}"
+            df[col] = self.returns.rolling(window).std()
+            
+            valid = df[col].dropna()
+            if len(valid) > 0:
+                stats[f"vol_{window}_mean"] = float(valid.mean())
+                stats[f"vol_{window}_std"] = float(valid.std())
+                stats[f"vol_{window}_min"] = float(valid.min())
+                stats[f"vol_{window}_max"] = float(valid.max())
+                
+                self.logger.metric(
+                    f"Vol (w={window})",
+                    f"mean={valid.mean():.6f}, range=[{valid.min():.6f}, {valid.max():.6f}]"
+                )
+        
+        self.rolling_volatility = df
+        self.result.artifacts["rolling_volatility"] = df
+        
+        return stats
+    
+    # ============================================================
+    # Step 4: Summary Statistics
+    # ============================================================
+    
+    def _summary(self) -> Dict[str, Any]:
+        """Compute overall volatility summary statistics"""
+        self.logger.info("Computing volatility summary")
+        
+        stats = {
+            "return_std": float(self.returns.std()),
+            "return_variance": float(self.returns.var()),
+            "max_abs_return": float(self.abs_returns.max()),
+            "mean_abs_return": float(self.abs_returns.mean()),
+            "median_abs_return": float(self.abs_returns.median()),
+            "mean_squared_return": float(self.squared_returns.mean()),
+            "skewness_abs_return": float(self.abs_returns.skew()),
+            "kurtosis_abs_return": float(self.abs_returns.kurtosis()),
+        }
+        
+        # Percentiles of absolute returns
+        for pct in [50, 75, 90, 95, 99]:
+            stats[f"abs_return_p{pct}"] = float(np.percentile(self.abs_returns, pct))
+        
+        self.logger.info(f"\nVolatility Summary:")
+        self.logger.info(f"  Return std: {stats['return_std']:.6f}")
+        self.logger.info(f"  Mean |r|: {stats['mean_abs_return']:.6f}")
+        self.logger.info(f"  Median |r|: {stats['median_abs_return']:.6f}")
+        self.logger.info(f"  95th percentile |r|: {stats['abs_return_p95']:.6f}")
+        self.logger.info(f"  99th percentile |r|: {stats['abs_return_p99']:.6f}")
+        self.logger.info(f"  Max |r|: {stats['max_abs_return']:.6f}")
+        
+        return stats
+    
+    # ============================================================
+    # Compute (uses execute_pipeline)
+    # ============================================================
+    
+    def compute(self) -> Dict[str, Any]:
+        """Execute all pipeline steps using shared execute_pipeline()"""
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Phase 1 complete: Volatility measurement finished")
+        return results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        """Execute research from file"""
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df: pd.DataFrame,
+                      dataset_id: str = "in_memory",
+                      output_dir: Optional[str] = None):
+        """Execute research from DataFrame"""
+        return super().run_dataframe(df, dataset_id, output_dir)

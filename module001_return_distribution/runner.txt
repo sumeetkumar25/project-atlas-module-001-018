@@ -1,0 +1,92 @@
+# atlas/runner.py
+"""
+Module Runner
+Orchestrates running a research module across multiple datasets.
+The module knows nothing about multiple datasets.
+The runner handles the iteration.
+"""
+
+from pathlib import Path
+from typing import List, Dict
+import pandas as pd
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.core.logger import AtlasLogger
+
+class ModuleRunner:
+    """
+    Executes a research module across multiple datasets.
+    
+    Philosophy:
+    - Module works on ONE dataset
+    - Runner iterates over MANY datasets
+    - Adding new datasets never requires changing the module
+    """
+    
+    def __init__(self):
+        self.logger = AtlasLogger("runner")
+    
+    def run_on_datasets(
+        self,
+        module_class: type,
+        datasets: Dict[str, str],
+        output_base_dir: str = "outputs"
+    ) -> Dict[str, any]:
+        """
+        Run a module on multiple datasets.
+        
+        Args:
+            module_class: Research module class (not instance)
+            datasets: Dictionary of {name: filepath}
+            output_base_dir: Base directory for outputs
+            
+        Returns:
+            Dictionary of {name: ResearchResult}
+        """
+        self.logger.header("MODULE RUNNER", f"Executing {module_class.__name__}")
+        
+        results = {}
+        
+        for dataset_name, filepath in datasets.items():
+            self.logger.section(f"Dataset: {dataset_name}")
+            self.logger.info(f"File: {filepath}")
+            
+            # Create fresh module instance for each dataset
+            module = module_class()
+            
+            # Create output directory for this dataset
+            output_dir = Path(output_base_dir) / module.module_name / dataset_name
+            
+            # Run module
+            result = module.run(filepath, output_dir=str(output_dir))
+            
+            results[dataset_name] = result
+            
+            self.logger.success(f"Completed: {dataset_name}")
+        
+        # Generate comparison report
+        self._generate_comparison(results, module_class.__name__, output_base_dir)
+        
+        return results
+    
+    def _generate_comparison(self, results: Dict, module_name: str, output_dir: str):
+        """Generate cross-dataset comparison"""
+        self.logger.section("Cross-Dataset Comparison")
+        
+        # Collect all statistics
+        comparison_data = []
+        for dataset_name, result in results.items():
+            row = {'dataset': dataset_name, **result.statistics}
+            comparison_data.append(row)
+        
+        comparison_df = pd.DataFrame(comparison_data)
+        
+        # Save comparison
+        comparison_path = Path(output_dir) / module_name / "dataset_comparison.csv"
+        comparison_path.parent.mkdir(parents=True, exist_ok=True)
+        comparison_df.to_csv(comparison_path, index=False)
+        
+        self.logger.success(f"Comparison saved to {comparison_path}")
+        
+        # Print key comparisons
+        self.logger.info("\nKey Metrics Comparison:")
+        print(comparison_df.to_string(index=False))

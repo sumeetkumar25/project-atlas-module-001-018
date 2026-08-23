@@ -1,0 +1,7 @@
+# atlas/modules/module013_range_expansion/__init__.py
+"""
+Module 013: Range Expansion & Compression
+Measures how BTC alternates between range compression and expansion periods.
+
+Phase 1.0: Skeleton architecture.
+"""

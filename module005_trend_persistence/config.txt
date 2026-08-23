@@ -1,0 +1,24 @@
+# atlas/modules/module005_trend_persistence/config.py
+"""
+Module 005 Configuration
+Trend Persistence Analysis - Phase 1
+"""
+
+# Lookback windows for trend strength assessment
+LOOKBACK_WINDOWS = [10, 20, 50]
+
+# Minimum consecutive candles to count as a trend
+MIN_TREND_LENGTH = 3
+
+# Minimum return magnitude (absolute) to consider as directional
+MIN_RETURN = 0.0  # 0 means all non-zero returns are directional
+
+# Module metadata
+MODULE_ID = "005"
+MODULE_NAME = "Trend Persistence"
+MODULE_VERSION = "0.1.0-phase1"
+
+# Trend direction labels
+UP_TREND = 1
+DOWN_TREND = -1
+FLAT = 0

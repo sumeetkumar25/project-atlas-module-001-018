@@ -1,0 +1,358 @@
+# atlas/modules/module010_volatility_persistence/validation_states.py
+"""
+Atlas State Assignment Validator
+Permanent validation for volatility state classification.
+
+Validates that percentile-to-state mapping is correct,
+boundaries are consistent, and NaN values are preserved.
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Tuple, List, Optional
+
+
+def validate_state_series(states: pd.Series,
+                          percentiles: pd.Series,
+                          labels: List[str],
+                          thresholds: List[float]) -> Tuple[bool, List[str]]:
+    """
+    Validate a state assignment series.
+    
+    Checks:
+    - Length matches percentile series
+    - NaN in percentiles → NaN in states (preserved)
+    - All non-NaN states are in allowed labels
+    - Counts are consistent
+    
+    Args:
+        states: Assigned state labels
+        percentiles: Source percentile values
+        labels: Allowed state labels
+        thresholds: Percentile thresholds (e.g., [25, 75, 95])
+        
+    Returns:
+        (is_valid, list_of_warnings)
+    """
+    warnings = []
+    is_valid = True
+    
+    # Check 1: Length matches
+    if len(states) != len(percentiles):
+        warnings.append(
+            f"Length mismatch: states={len(states)}, percentiles={len(percentiles)}"
+        )
+        is_valid = False
+        return is_valid, warnings
+    
+    # Check 2: NaN preservation
+    pct_nan_mask = percentiles.isna()
+    state_nan_mask = states.isna()
+    
+    if not (pct_nan_mask == state_nan_mask).all():
+        mismatch = (pct_nan_mask != state_nan_mask).sum()
+        warnings.append(
+            f"NaN mismatch: {mismatch} rows where percentile NaN != state NaN"
+        )
+        is_valid = False
+    
+    # Check 3: All non-NaN states are in allowed labels
+    valid_states = states.dropna()
+    if len(valid_states) > 0:
+        invalid_labels = set(valid_states.unique()) - set(labels)
+        if invalid_labels:
+            warnings.append(f"Invalid state labels found: {invalid_labels}")
+            is_valid = False
+    
+    # Check 4: No missing labels (all labels should appear if data covers full range)
+    if len(valid_states) > len(labels) * 2:
+        present_labels = set(valid_states.unique())
+        missing_labels = set(labels) - present_labels
+        if missing_labels:
+            warnings.append(f"State labels never assigned: {missing_labels}")
+            # Not a hard error - data may not cover all ranges
+    
+    # Check 5: Counts sum to valid states
+    counts = valid_states.value_counts()
+    if counts.sum() != len(valid_states):
+        warnings.append("State counts don't sum to valid states")
+        is_valid = False
+    
+    # Check 6: NaNs are consistent
+    state_nan_count = int(states.isna().sum())
+    pct_nan_count = int(percentiles.isna().sum())
+    if state_nan_count != pct_nan_count:
+        warnings.append(
+            f"NaN count mismatch: states={state_nan_count}, percentiles={pct_nan_count}"
+        )
+        is_valid = False
+    
+    return is_valid, warnings
+
+
+def assign_states_from_percentiles(percentiles: pd.Series,
+                                    thresholds: List[float],
+                                    labels: List[str]) -> pd.Series:
+    """
+    Assign volatility states from percentile values.
+    
+    Boundary rules:
+    - percentile < thresholds[0]  → labels[0]  (Low)
+    - thresholds[0] ≤ pct < thresholds[1] → labels[1]  (Normal)
+    - thresholds[1] ≤ pct < thresholds[2] → labels[2]  (High)
+    - percentile ≥ thresholds[2] → labels[3]  (Extreme)
+    - NaN percentile → NaN state
+    
+    Args:
+        percentiles: Series of percentile values (0-100, may contain NaN)
+        thresholds: Boundary values [low_threshold, high_threshold, extreme_threshold]
+        labels: State labels [low, normal, high, extreme]
+        
+    Returns:
+        Series of state labels, same length as input
+    """
+    if len(thresholds) != len(labels) - 1:
+        raise ValueError(
+            f"Need {len(labels) - 1} thresholds for {len(labels)} labels, "
+            f"got {len(thresholds)}"
+        )
+    
+    states = pd.Series(np.nan, index=percentiles.index, dtype=object)
+    
+    for i in range(len(percentiles)):
+        pct = percentiles.iloc[i]
+        
+        if pd.isna(pct):
+            continue  # Leave as NaN
+        
+        if pct < thresholds[0]:
+            states.iloc[i] = labels[0]
+        elif pct < thresholds[1]:
+            states.iloc[i] = labels[1]
+        elif pct < thresholds[2]:
+            states.iloc[i] = labels[2]
+        else:
+            states.iloc[i] = labels[3]
+    
+    return states
+
+
+# ============================================================
+# Unit Tests
+# ============================================================
+
+def test_known_percentiles():
+    """
+    Test A: Known percentile values map to correct states.
+    
+    10 → Low, 30 → Normal, 80 → High, 98 → Extreme
+    """
+    percentiles = pd.Series([10.0, 30.0, 80.0, 98.0])
+    thresholds = [25, 75, 95]
+    labels = ["Low", "Normal", "High", "Extreme"]
+    
+    states = assign_states_from_percentiles(percentiles, thresholds, labels)
+    
+    assert states.iloc[0] == "Low", f"10% should be Low, got {states.iloc[0]}"
+    assert states.iloc[1] == "Normal", f"30% should be Normal, got {states.iloc[1]}"
+    assert states.iloc[2] == "High", f"80% should be High, got {states.iloc[2]}"
+    assert states.iloc[3] == "Extreme", f"98% should be Extreme, got {states.iloc[3]}"
+    
+    return True
+
+
+def test_boundary_values():
+    """
+    Test B: Exact boundary values.
+    
+    Design decision documented here:
+    - 25 → Normal (≥ 25, < 75)
+    - 75 → High (≥ 75, < 95)
+    - 95 → Extreme (≥ 95)
+    """
+    percentiles = pd.Series([25.0, 75.0, 95.0])
+    thresholds = [25, 75, 95]
+    labels = ["Low", "Normal", "High", "Extreme"]
+    
+    states = assign_states_from_percentiles(percentiles, thresholds, labels)
+    
+    assert states.iloc[0] == "Normal", \
+        f"Boundary 25 should be Normal, got {states.iloc[0]}"
+    assert states.iloc[1] == "High", \
+        f"Boundary 75 should be High, got {states.iloc[1]}"
+    assert states.iloc[2] == "Extreme", \
+        f"Boundary 95 should be Extreme, got {states.iloc[2]}"
+    
+    return True
+
+
+def test_nan_preservation():
+    """
+    Test C: NaN percentiles → NaN states.
+    """
+    percentiles = pd.Series([50.0, np.nan, 80.0, np.nan, 10.0])
+    thresholds = [25, 75, 95]
+    labels = ["Low", "Normal", "High", "Extreme"]
+    
+    states = assign_states_from_percentiles(percentiles, thresholds, labels)
+    
+    assert pd.isna(states.iloc[1]), "NaN percentile should give NaN state"
+    assert pd.isna(states.iloc[3]), "NaN percentile should give NaN state"
+    assert not pd.isna(states.iloc[0]), "Valid percentile should give valid state"
+    assert not pd.isna(states.iloc[2]), "Valid percentile should give valid state"
+    
+    # NaN positions must match
+    assert (percentiles.isna() == states.isna()).all(), \
+        "NaN positions must be identical"
+    
+    return True
+
+
+def test_counts_sum():
+    """
+    Test D: State counts sum to number of valid percentiles.
+    """
+    np.random.seed(42)
+    n = 1000
+    percentiles = pd.Series(np.random.uniform(0, 100, n))
+    percentiles.iloc[:10] = np.nan  # Add some NaN
+    
+    thresholds = [25, 75, 95]
+    labels = ["Low", "Normal", "High", "Extreme"]
+    
+    states = assign_states_from_percentiles(percentiles, thresholds, labels)
+    
+    valid_states = states.dropna()
+    counts = valid_states.value_counts()
+    
+    assert counts.sum() == len(valid_states), \
+        f"Counts sum ({counts.sum()}) != valid states ({len(valid_states)})"
+    
+    return True
+
+
+def test_allowed_labels_only():
+    """
+    Test E: Only allowed labels appear.
+    """
+    np.random.seed(42)
+    n = 2000
+    percentiles = pd.Series(np.random.uniform(0, 100, n))
+    
+    thresholds = [25, 75, 95]
+    labels = ["Low", "Normal", "High", "Extreme"]
+    
+    states = assign_states_from_percentiles(percentiles, thresholds, labels)
+    
+    unique_states = set(states.dropna().unique())
+    invalid = unique_states - set(labels)
+    
+    assert len(invalid) == 0, f"Invalid labels found: {invalid}"
+    
+    return True
+
+
+def test_reference_mapping():
+    """
+    Test F: Compare with independent plain-Python implementation.
+    """
+    np.random.seed(42)
+    n = 500
+    percentiles = pd.Series(np.random.uniform(0, 100, n))
+    percentiles.iloc[:5] = np.nan
+    
+    thresholds = [25, 75, 95]
+    labels = ["Low", "Normal", "High", "Extreme"]
+    
+    # Atlas implementation
+    atlas_states = assign_states_from_percentiles(percentiles, thresholds, labels)
+    
+    # Independent reference
+    ref_states = []
+    for pct in percentiles:
+        if pd.isna(pct):
+            ref_states.append(None)
+        elif pct < 25:
+            ref_states.append("Low")
+        elif pct < 75:
+            ref_states.append("Normal")
+        elif pct < 95:
+            ref_states.append("High")
+        else:
+            ref_states.append("Extreme")
+    
+    # Compare
+    for i in range(n):
+        atlas_val = atlas_states.iloc[i]
+        ref_val = ref_states[i]
+        
+        if pd.isna(atlas_val) and ref_val is None:
+            continue
+        if atlas_val == ref_val:
+            continue
+        
+        assert False, f"Index {i}: atlas={atlas_val}, ref={ref_val}"
+    
+    return True
+
+
+def test_length_preserved():
+    """
+    Test G: Output length equals input length.
+    """
+    for n in [10, 100, 1000, 10000]:
+        percentiles = pd.Series(np.random.uniform(0, 100, n))
+        thresholds = [25, 75, 95]
+        labels = ["Low", "Normal", "High", "Extreme"]
+        
+        states = assign_states_from_percentiles(percentiles, thresholds, labels)
+        
+        assert len(states) == n, f"Length mismatch: {len(states)} vs {n}"
+    
+    return True
+
+
+def run_all_validation_tests():
+    """Run all state assignment validation tests"""
+    print("\n" + "=" * 60)
+    print("ATLAS STATE ASSIGNMENT VALIDATOR - UNIT TESTS")
+    print("=" * 60)
+    print("  Boundaries: <25=Low, 25-75=Normal, 75-95=High, ≥95=Extreme")
+    print("  NaN preservation: Yes")
+    
+    tests = [
+        ("Known Percentiles (10,30,80,98)", test_known_percentiles),
+        ("Boundary Values (25,75,95)", test_boundary_values),
+        ("NaN Preservation", test_nan_preservation),
+        ("Counts Sum to Valid States", test_counts_sum),
+        ("Only Allowed Labels", test_allowed_labels_only),
+        ("Reference Mapping (plain Python)", test_reference_mapping),
+        ("Length Preserved", test_length_preserved),
+    ]
+    
+    results = {}
+    for name, test_func in tests:
+        try:
+            test_func()
+            results[name] = True
+            print(f"  ✓ {name}")
+        except AssertionError as e:
+            results[name] = False
+            print(f"  ✗ {name}: {e}")
+        except Exception as e:
+            results[name] = False
+            print(f"  ✗ {name}: {type(e).__name__}: {e}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    print("=" * 60)
+    
+    return passed == total
+
+
+if __name__ == "__main__":
+    success = run_all_validation_tests()
+    import sys
+    sys.exit(0 if success else 1)

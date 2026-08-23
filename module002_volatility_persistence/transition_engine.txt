@@ -1,0 +1,187 @@
+# atlas/modules/module002_volatility_persistence/transition_engine.py
+"""
+Transition Matrix Engine - Phase 3
+
+Builds first-order Markov transition matrix from volatility regimes.
+Measures how volatility regimes transition from one state to the next.
+
+Key insight: If volatility is persistent, diagonal elements will be
+significantly larger than off-diagonal elements.
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Tuple, List
+
+
+class TransitionMatrixEngine:
+    """
+    First-order Markov transition matrix estimator.
+    
+    For each consecutive pair of regime observations (r_t, r_{t+1}),
+    counts the frequency of each transition, then converts to
+    conditional probabilities.
+    
+    Example output (probability matrix):
+          VL     L      M      H      E
+    VL   0.78  0.18   0.04   0.00   0.00
+    L    0.16  0.63   0.18   0.03   0.00
+    M    0.05  0.22   0.51   0.18   0.04
+    H    0.01  0.08   0.28   0.45   0.18
+    E    0.00  0.02   0.10   0.31   0.57
+    
+    Interpretation:
+    - Diagonal: Probability of staying in same regime (persistence)
+    - Off-diagonal: Probability of transitioning to another regime
+    - High diagonal values indicate volatility persistence
+    """
+    
+    def __init__(self, labels: List[str]):
+        """
+        Initialize transition engine.
+        
+        Args:
+            labels: Ordered list of regime labels (e.g., ["VL", "L", "M", "H", "E"])
+        """
+        self.labels = labels
+        self.n_states = len(labels)
+    
+    def build(self, regime_series: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """
+        Build transition matrices from regime series.
+        
+        Args:
+            regime_series: Series containing regime labels (VL, L, M, H, E)
+                          May contain NaN values which are excluded.
+        
+        Returns:
+            Tuple of:
+            - transition_counts: Count matrix (integer)
+            - transition_probability: Probability matrix (float, rows sum to 1)
+            - transition_sequence: DataFrame with 'from' and 'to' columns
+        """
+        # Remove NaN and reset index for clean iteration
+        clean = regime_series.dropna().reset_index(drop=True)
+        
+        if len(clean) < 2:
+            raise ValueError(f"Need at least 2 observations, got {len(clean)}")
+        
+        # Initialize count matrix with zeros
+        counts = pd.DataFrame(
+            0,
+            index=self.labels,
+            columns=self.labels,
+            dtype=int
+        )
+        
+        # Record each transition
+        transitions = []
+        
+        for i in range(len(clean) - 1):
+            current = clean.iloc[i]
+            nxt = clean.iloc[i + 1]
+            
+            # Increment count
+            counts.loc[current, nxt] += 1
+            
+            # Record transition
+            transitions.append({
+                "from": current,
+                "to": nxt
+            })
+        
+        # Convert counts to probabilities
+        probabilities = counts.astype(float)
+        
+        # Normalize each row to sum to 1
+        row_sums = probabilities.sum(axis=1)
+        
+        # Handle rows with zero transitions (shouldn't happen with valid data)
+        for label in self.labels:
+            if row_sums[label] > 0:
+                probabilities.loc[label] = probabilities.loc[label] / row_sums[label]
+            else:
+                # If a state never occurs as source, set uniform probabilities
+                probabilities.loc[label] = 1.0 / self.n_states
+        
+        return (
+            counts,
+            probabilities,
+            pd.DataFrame(transitions)
+        )
+    
+    def get_persistence_scores(self, probability_matrix: pd.DataFrame) -> pd.Series:
+        """
+        Extract diagonal elements as persistence scores.
+        
+        Args:
+            probability_matrix: Transition probability matrix
+            
+        Returns:
+            Series with persistence probability for each regime
+        """
+        persistence = pd.Series(index=self.labels, dtype=float)
+        
+        for label in self.labels:
+            if label in probability_matrix.index and label in probability_matrix.columns:
+                persistence[label] = probability_matrix.loc[label, label]
+        
+        return persistence
+    
+    def get_escape_probabilities(self, probability_matrix: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculate probability of leaving each regime.
+        
+        Args:
+            probability_matrix: Transition probability matrix
+            
+        Returns:
+            DataFrame with escape probabilities to each destination
+        """
+        escape = probability_matrix.copy()
+        
+        for label in self.labels:
+            if label in escape.index and label in escape.columns:
+                # Set diagonal to 0 to show only transitions away
+                escape.loc[label, label] = 0.0
+        
+        return escape
+    
+    def summary(self, probability_matrix: pd.DataFrame) -> str:
+        """
+        Generate human-readable summary of transition matrix.
+        
+        Args:
+            probability_matrix: Transition probability matrix
+            
+        Returns:
+            Formatted string showing the matrix
+        """
+        lines = []
+        lines.append("Transition Probability Matrix:")
+        lines.append("")
+        
+        # Header
+        header = "From\\To  " + "  ".join(f"{l:>6}" for l in self.labels)
+        lines.append(header)
+        lines.append("-" * len(header))
+        
+        # Rows
+        for from_label in self.labels:
+            row_values = []
+            for to_label in self.labels:
+                prob = probability_matrix.loc[from_label, to_label]
+                row_values.append(f"{prob:6.3f}")
+            
+            # Mark diagonal with asterisk
+            row_str = f"{from_label:>6}   " + "  ".join(row_values)
+            lines.append(row_str)
+        
+        # Persistence summary
+        lines.append("")
+        lines.append("Persistence (diagonal) probabilities:")
+        persistence = self.get_persistence_scores(probability_matrix)
+        for label, prob in persistence.items():
+            lines.append(f"  {label}: {prob:.3f} ({prob*100:.1f}%)")
+        
+        return "\n".join(lines)

@@ -1,0 +1,44 @@
+# atlas/modules/module006_volatility_clustering/protocol.py
+"""
+Research Protocol
+Module 006 - Volatility Clustering
+"""
+
+PROTOCOL = {
+    "module_id": "006",
+    "module_name": "Volatility Clustering",
+    "research_question": "Does BTC exhibit volatility clustering?",
+    "null_hypothesis": "Volatility is randomly distributed through time.",
+    "alternative_hypothesis": "High volatility follows high volatility.",
+    "rationale": (
+        "Volatility clustering is one of the most well-documented stylized facts "
+        "in financial time series. Large price changes tend to be followed by "
+        "large price changes, and small changes by small changes. "
+        "This has profound implications for risk management and option pricing."
+    ),
+    "methodology": (
+        "Phase 1: Volatility Measurement\n"
+        "1. Calculate log returns\n"
+        "2. Compute volatility proxies (absolute returns, squared returns)\n"
+        "3. Calculate rolling volatility for multiple windows\n"
+        "4. Summary statistics\n"
+        "Phase 2: Clustering Tests (future)\n"
+        "- Autocorrelation of volatility proxies\n"
+        "- Ljung-Box on squared returns\n"
+        "- ARCH effects testing"
+    ),
+    "phase": 1,
+    "statistics": [
+        "return_count",
+        "return_std",
+        "mean_abs_return",
+        "mean_squared_return",
+        "max_abs_return",
+        "rolling_volatility"
+    ],
+    "outputs": [
+        "statistics",
+        "volatility_series",
+        "rolling_volatility"
+    ]
+}

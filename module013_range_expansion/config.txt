@@ -1,0 +1,25 @@
+# atlas/modules/module013_range_expansion/config.py
+"""
+Module 013 Configuration
+Range Expansion & Compression
+"""
+
+MODULE_ID = "013"
+MODULE_NAME = "Range Expansion & Compression"
+MODULE_VERSION = "0.6.0-phase1.6"
+
+# ---------- ATR ----------
+ATR_WINDOW = 14
+
+# ---------- Percentile ----------
+PERCENTILE_WINDOW = 252
+
+# ---------- Compression ----------
+LOW_PERCENTILE = 25
+
+# ---------- Expansion ----------
+HIGH_PERCENTILE = 75
+EXTREME_PERCENTILE = 95
+
+# ---------- Segments ----------
+MIN_SEGMENT_LENGTH = 1

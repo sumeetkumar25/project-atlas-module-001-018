@@ -1,0 +1,373 @@
+# atlas/modules/module011_breakout_statistics/module.py
+"""
+Module 011: Breakout Statistics - Phase 1
+
+Measures what happens after BTC breaks beyond recent trading ranges.
+
+Breakout definition (frozen):
+  Upper breakout: close > highest high of previous N bars (current excluded)
+  Lower breakout: close < lowest low of previous N bars (current excluded)
+
+No indicators. No SMC. No ICT. Pure price discovery measurement.
+"""
+
+from typing import Dict, Any, Optional, List
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+from atlas.framework.protocol import ResearchProtocol, ModuleStatus, ModuleCategory
+
+from .config import (
+    MODULE_ID, MODULE_NAME, MODULE_VERSION,
+    BREAKOUT_LOOKBACK, BREAKOUT_CONFIRMATION, MIN_BREAKOUT_SIZE,
+    LOOKAHEAD_BARS, BREAKOUT_EVENT_COLUMNS,
+)
+from .protocol import PROTOCOL
+
+MODULE_INFO = {
+    "id": MODULE_ID, "name": MODULE_NAME, "version": MODULE_VERSION,
+    "author": "Project Atlas",
+    "phase": "Phase 1 - Breakout Detection",
+    "requires": ["000", "010"],
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": ["breakout_events", "breakout_summary", "breakout_diagnostics"],
+    "status": "Research In Progress - Phase 1",
+    "breakout_definition": "close > N-bar high (up) or close < N-bar low (down)",
+    "lookback": BREAKOUT_LOOKBACK,
+}
+
+
+class BreakoutStatisticsResearch(BaseResearchModule):
+    """
+    Module 011: Breakout Statistics - Phase 1
+    
+    Detects when price breaks beyond a recent trading range and measures
+    what happens afterward. No trading signals - pure measurement.
+    """
+    
+    PROTOCOL = PROTOCOL
+    MODULE_INFO = MODULE_INFO
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(module_name=MODULE_NAME, module_version=MODULE_VERSION)
+        self.registry = registry or AtlasRegistry()
+        existing = self.registry.get_module(MODULE_ID)
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        self.breakout_events: Optional[pd.DataFrame] = None
+    
+    def _register_pipeline_steps(self):
+        self.pipeline_steps = [
+            ("rolling_range", self._compute_rolling_range),
+            ("detect_breakouts", self._detect_breakouts),
+            ("measure_outcomes", self._measure_outcomes),
+            ("summary", self._compute_summary),
+        ]
+    
+    def get_config_snapshot(self) -> Dict[str, Any]:
+        return {
+            "module_name": self.module_name, "module_version": self.module_version,
+            "breakout_lookback": BREAKOUT_LOOKBACK,
+            "breakout_confirmation": BREAKOUT_CONFIRMATION,
+            "min_breakout_size": MIN_BREAKOUT_SIZE,
+            "lookahead_bars": LOOKAHEAD_BARS,
+        }
+    
+    def get_protocol_snapshot(self) -> Dict[str, Any]:
+        return {
+            "question": PROTOCOL.question, "hypothesis": PROTOCOL.hypothesis,
+            "methodology": PROTOCOL.methodology, "depends_on": PROTOCOL.depends_on,
+        }
+    
+    # ---- Step 1: Rolling Range ----
+    def _compute_rolling_range(self) -> Dict[str, Any]:
+        """
+        Compute rolling highest high and lowest low.
+        
+        CRITICAL: Current bar is EXCLUDED from the lookback window.
+        Only historical bars are used. No future leakage.
+        """
+        self.logger.info("Step 1: Computing rolling range")
+        self.logger.info(f"  Lookback: {BREAKOUT_LOOKBACK} bars")
+        self.logger.info(f"  Current bar: EXCLUDED from range")
+        
+        high = self.df['high'].values
+        low = self.df['low'].values
+        n = len(high)
+        
+        rolling_high = np.full(n, np.nan)
+        rolling_low = np.full(n, np.nan)
+        
+        for i in range(BREAKOUT_LOOKBACK, n):
+            rolling_high[i] = high[i - BREAKOUT_LOOKBACK:i].max()
+            rolling_low[i] = low[i - BREAKOUT_LOOKBACK:i].min()
+        
+        self.df['rolling_high'] = rolling_high
+        self.df['rolling_low'] = rolling_low
+        
+        valid = (~np.isnan(rolling_high)).sum()
+        self.logger.metric("Valid ranges computed", f"{int(valid):,}")
+        self.logger.metric("Warm-up bars", f"{BREAKOUT_LOOKBACK}")
+        
+        return {"range_warmup_bars": BREAKOUT_LOOKBACK, "valid_ranges": int(valid)}
+    
+    # ---- Step 2: Detect Breakouts ----
+    def _detect_breakouts(self) -> Dict[str, Any]:
+        """
+        Detect breakout events.
+        
+        Upper breakout: close > previous N-bar highest high
+        Lower breakout: close < previous N-bar lowest low
+        
+        Current bar is excluded from the range by construction in Step 1.
+        """
+        self.logger.info("Step 2: Detecting breakout events")
+        self.logger.info(f"  Confirmation: {BREAKOUT_CONFIRMATION}")
+        self.logger.info(f"  Lookback: {BREAKOUT_LOOKBACK}")
+        
+        close = self.df['close'].values
+        rolling_high = self.df['rolling_high'].values
+        rolling_low = self.df['rolling_low'].values
+        timestamps = self.df['timestamp'].values
+        n = len(close)
+        
+        events = []
+        breakout_id = 0
+        
+        for i in range(BREAKOUT_LOOKBACK, n):
+            if np.isnan(rolling_high[i]) or np.isnan(rolling_low[i]):
+                continue
+            
+            current_close = close[i]
+            range_high = rolling_high[i]
+            range_low = rolling_low[i]
+            range_width = (range_high - range_low) / range_low * 100
+            
+            # Upper breakout
+            if current_close > range_high:
+                events.append({
+                    "breakout_id": breakout_id,
+                    "timestamp": timestamps[i],
+                    "direction": "Up",
+                    "lookback": BREAKOUT_LOOKBACK,
+                    "breakout_price": float(current_close),
+                    "previous_range_high": float(range_high),
+                    "previous_range_low": float(range_low),
+                    "range_width_pct": round(range_width, 4),
+                    "bar_index": i,
+                })
+                breakout_id += 1
+            
+            # Lower breakout
+            elif current_close < range_low:
+                events.append({
+                    "breakout_id": breakout_id,
+                    "timestamp": timestamps[i],
+                    "direction": "Down",
+                    "lookback": BREAKOUT_LOOKBACK,
+                    "breakout_price": float(current_close),
+                    "previous_range_high": float(range_high),
+                    "previous_range_low": float(range_low),
+                    "range_width_pct": round(range_width, 4),
+                    "bar_index": i,
+                })
+                breakout_id += 1
+        
+        self.breakout_events = pd.DataFrame(events)
+        
+        n_up = int((self.breakout_events['direction'] == 'Up').sum()) if len(events) > 0 else 0
+        n_down = int((self.breakout_events['direction'] == 'Down').sum()) if len(events) > 0 else 0
+        
+        self.logger.metric("Total breakouts", f"{len(events):,}")
+        self.logger.metric("Up breakouts", f"{n_up:,}")
+        self.logger.metric("Down breakouts", f"{n_down:,}")
+        
+        return {"breakout_count": len(events), "up_breakouts": n_up, "down_breakouts": n_down}
+    
+    # ---- Step 3: Measure Outcomes ----
+    def _measure_outcomes(self) -> Dict[str, Any]:
+        """
+        Measure post-breakout behavior.
+        
+        For each breakout:
+        - MFE: Maximum favorable excursion (further in breakout direction)
+        - MAE: Maximum adverse excursion (reversal toward range)
+        - Bars to peak: Time to maximum move
+        - Bars to failure: Time until price returns inside range
+        """
+        self.logger.info("Step 3: Measuring post-breakout outcomes")
+        self.logger.info(f"  Lookahead: {LOOKAHEAD_BARS} bars")
+        
+        if self.breakout_events is None or len(self.breakout_events) == 0:
+            self.logger.warning("No breakout events to measure")
+            self.breakout_events = pd.DataFrame(columns=BREAKOUT_EVENT_COLUMNS)
+            return {"events_measured": 0}
+        
+        close = self.df['close'].values
+        n = len(close)
+        
+        mfe_values = []
+        mae_values = []
+        bars_to_peak_values = []
+        bars_to_failure_values = []
+        failed_values = []
+        
+        for _, event in self.breakout_events.iterrows():
+            bar_idx = int(event['bar_index'])
+            direction = event['direction']
+            breakout_price = event['breakout_price']
+            range_high = event['previous_range_high']
+            range_low = event['previous_range_low']
+            
+            lookahead_end = min(bar_idx + LOOKAHEAD_BARS + 1, n)
+            future_prices = close[bar_idx + 1:lookahead_end]
+            
+            if len(future_prices) == 0:
+                mfe_values.append(0.0)
+                mae_values.append(0.0)
+                bars_to_peak_values.append(0)
+                bars_to_failure_values.append(0)
+                failed_values.append(False)
+                continue
+            
+            if direction == "Up":
+                mfe = (future_prices.max() - breakout_price) / breakout_price * 100
+                mae = (breakout_price - future_prices.min()) / breakout_price * 100
+                mfe = max(0, mfe)
+                mae = max(0, mae)
+                peak_bar = np.argmax(future_prices) + 1
+                
+                # Failure: price falls back below range high
+                failure_bars = 0
+                failed = False
+                for j, p in enumerate(future_prices):
+                    if p < range_high:
+                        failed = True
+                        failure_bars = j + 1
+                        break
+                
+            else:  # Down
+                mfe = (breakout_price - future_prices.min()) / breakout_price * 100
+                mae = (future_prices.max() - breakout_price) / breakout_price * 100
+                mfe = max(0, mfe)
+                mae = max(0, mae)
+                peak_bar = np.argmin(future_prices) + 1
+                
+                # Failure: price rises back above range low
+                failure_bars = 0
+                failed = False
+                for j, p in enumerate(future_prices):
+                    if p > range_low:
+                        failed = True
+                        failure_bars = j + 1
+                        break
+            
+            mfe_values.append(round(mfe, 4))
+            mae_values.append(round(mae, 4))
+            bars_to_peak_values.append(peak_bar)
+            bars_to_failure_values.append(failure_bars)
+            failed_values.append(failed)
+        
+        self.breakout_events['subsequent_mfe_pct'] = mfe_values
+        self.breakout_events['subsequent_mae_pct'] = mae_values
+        self.breakout_events['bars_to_peak'] = bars_to_peak_values
+        self.breakout_events['bars_to_failure'] = bars_to_failure_values
+        self.breakout_events['failed'] = failed_values
+        
+        # Ensure correct column order for export
+        available_cols = [c for c in BREAKOUT_EVENT_COLUMNS if c in self.breakout_events.columns]
+        self.result.artifacts['breakout_events'] = self.breakout_events[available_cols].copy()
+        
+        n_measured = len(self.breakout_events)
+        n_failed = int(sum(failed_values))
+        
+        self.logger.metric("Events measured", f"{n_measured:,}")
+        self.logger.metric("Failures", f"{n_failed} ({n_failed/n_measured*100:.1f}%)" if n_measured > 0 else "0")
+        
+        if n_measured > 0:
+            self.logger.metric("Mean MFE", f"{np.mean(mfe_values):.4f}%")
+            self.logger.metric("Mean MAE", f"{np.mean(mae_values):.4f}%")
+        
+        return {
+            "events_measured": n_measured,
+            "failure_count": n_failed,
+            "failure_rate": round(n_failed / n_measured, 4) if n_measured > 0 else 0,
+            "mean_mfe": round(float(np.mean(mfe_values)), 4) if n_measured > 0 else 0,
+            "mean_mae": round(float(np.mean(mae_values)), 4) if n_measured > 0 else 0,
+        }
+    
+    # ---- Step 4: Summary ----
+    def _compute_summary(self) -> Dict[str, Any]:
+        """Compute breakout summary statistics."""
+        self.logger.info("Step 4: Computing breakout summary")
+        
+        if self.breakout_events is None or len(self.breakout_events) == 0:
+            self.logger.warning("No events to summarize")
+            return {"events_summarized": 0}
+        
+        ev = self.breakout_events
+        n = len(ev)
+        
+        stats = {
+            "total_breakouts": n,
+            "up_breakouts": int((ev['direction'] == 'Up').sum()),
+            "down_breakouts": int((ev['direction'] == 'Down').sum()),
+            "mean_mfe_pct": round(float(ev['subsequent_mfe_pct'].mean()), 4),
+            "median_mfe_pct": round(float(ev['subsequent_mfe_pct'].median()), 4),
+            "mean_mae_pct": round(float(ev['subsequent_mae_pct'].mean()), 4),
+            "median_mae_pct": round(float(ev['subsequent_mae_pct'].median()), 4),
+            "failure_rate": round(float(ev['failed'].mean()), 4),
+            "mean_bars_to_peak": round(float(ev['bars_to_peak'].mean()), 1),
+            "median_bars_to_peak": round(float(ev['bars_to_peak'].median()), 1),
+            "mean_range_width_pct": round(float(ev['range_width_pct'].mean()), 4),
+        }
+        
+        # By direction
+        for d in ['Up', 'Down']:
+            mask = ev['direction'] == d
+            subset = ev[mask]
+            if len(subset) > 0:
+                stats[f"{d.lower()}_mean_mfe"] = round(float(subset['subsequent_mfe_pct'].mean()), 4)
+                stats[f"{d.lower()}_mean_mae"] = round(float(subset['subsequent_mae_pct'].mean()), 4)
+                stats[f"{d.lower()}_failure_rate"] = round(float(subset['failed'].mean()), 4)
+        
+        # Percentiles
+        for pct in [50, 75, 90, 95]:
+            stats[f"mfe_p{pct}"] = round(float(np.percentile(ev['subsequent_mfe_pct'], pct)), 4)
+            stats[f"mae_p{pct}"] = round(float(np.percentile(ev['subsequent_mae_pct'], pct)), 4)
+        
+        for key, value in stats.items():
+            self.result.statistics[key] = value
+        
+        self.logger.info(f"\n  Breakout Summary ({n:,} events):")
+        self.logger.info(f"    Up: {stats['up_breakouts']:,}, Down: {stats['down_breakouts']:,}")
+        self.logger.info(f"    Mean MFE: {stats['mean_mfe_pct']:.4f}%")
+        self.logger.info(f"    Mean MAE: {stats['mean_mae_pct']:.4f}%")
+        self.logger.info(f"    Failure rate: {stats['failure_rate']*100:.1f}%")
+        
+        # Diagnostic artifact
+        diag_data = {
+            "metric": list(stats.keys()),
+            "value": list(stats.values()),
+        }
+        self.result.artifacts['breakout_summary'] = pd.DataFrame(diag_data)
+        
+        return {"events_summarized": n}
+    
+    def compute(self) -> Dict[str, Any]:
+        self.logger.section("Executing Pipeline (Phase 1)")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 011 Phase 1 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df: pd.DataFrame, dataset_id: str = "in_memory",
+                      output_dir: Optional[str] = None):
+        return super().run_dataframe(df, dataset_id, output_dir)

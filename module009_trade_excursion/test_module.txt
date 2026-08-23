@@ -1,0 +1,361 @@
+# atlas/modules/module009_trade_excursion/test_module.py
+"""
+Module 009 Phase 1 Test Runner
+
+Tests MFE/MAE calculation on synthetic data and BTC datasets.
+
+Synthetic Test 1: Perfect continuation → MFE > 0, MAE ≈ 0
+Synthetic Test 2: Immediate reversal → MFE ≈ 0, MAE > 0
+Synthetic Test 3: Mixed → Both MFE and MAE present
+Synthetic Test 4: BTC datasets via full chain
+"""
+
+import sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+from atlas.modules.module009_trade_excursion.module import (
+    TradeExcursionResearch,
+    compute_mfe_mae
+)
+from atlas.runner import ModuleRunner
+from atlas.framework.registry import AtlasRegistry
+from atlas.framework.framework_check import FrameworkChecker
+
+
+def create_price_dataframe(prices: np.ndarray) -> pd.DataFrame:
+    """Create OHLCV DataFrame from price series"""
+    n = len(prices)
+    dates = pd.date_range(start="2020-01-01", periods=n, freq="15min")
+    
+    return pd.DataFrame({
+        "timestamp": dates,
+        "open": prices,
+        "high": prices * 1.005,
+        "low": prices * 0.995,
+        "close": prices,
+        "volume": np.ones(n) * 100
+    })
+
+
+def test_synthetic_perfect_continuation():
+    """
+    Test 1: Price only goes up after entry.
+    
+    Entry at 100, future: 102, 104, 106, 108
+    MFE = 8%, MAE = 0%
+    """
+    print("\n" + "=" * 60)
+    print("SYNTHETIC TEST 1: Perfect Continuation")
+    print("=" * 60)
+    
+    # Create synthetic events manually (bypassing chain)
+    events = pd.DataFrame([{
+        "trend_id": 1,
+        "trend_direction": "Up",
+        "pullback_depth_pct": 2.0,
+        "pullback_duration": 5,
+        "pullback_end_price": 100.0,
+        "pullback_end_idx": 0,
+        "outcome": "continuation"
+    }])
+    
+    # Price only goes up
+    prices = np.array([100, 102, 104, 106, 108])
+    df = create_price_dataframe(prices)
+    
+    research = TradeExcursionResearch()
+    research.set_events(events)
+    result = research.run_dataframe(df, dataset_id="synthetic_continuation")
+    
+    mfe = result.statistics.get("mean_mfe", 0)
+    mae = result.statistics.get("mean_mae", 0)
+    rr = result.statistics.get("mean_rr", 0)
+    
+    print(f"\n  Prices after entry: {prices[1:].tolist()}")
+    print(f"  MFE: {mfe:.2f}% (expected: 8%)")
+    print(f"  MAE: {mae:.2f}% (expected: 0%)")
+    print(f"  RR: {rr:.2f}")
+    
+    checks_passed = 0
+    
+    # MFE should be ~8%
+    if abs(mfe - 8.0) < 0.5:
+        print(f"  ✓ MFE correct ({mfe:.1f}%)")
+        checks_passed += 1
+    else:
+        print(f"  ✗ MFE wrong: {mfe:.1f}% (expected 8%)")
+    
+    # MAE should be 0%
+    if mae == 0:
+        print(f"  ✓ MAE = 0% (no drawdown)")
+        checks_passed += 1
+    else:
+        print(f"  ✗ MAE should be 0%, got {mae:.2f}%")
+    
+    # MFE >= 0, MAE >= 0
+    if mfe >= 0 and mae >= 0:
+        print(f"  ✓ Both MFE and MAE non-negative")
+        checks_passed += 1
+    
+    print(f"\n  Test: {checks_passed}/3 passed")
+    return checks_passed == 3
+
+
+def test_synthetic_immediate_reversal():
+    """
+    Test 2: Price only goes down after entry.
+    
+    Entry at 100, future: 99, 97, 95
+    For uptrend: MFE = 0%, MAE = 5%
+    """
+    print("\n" + "=" * 60)
+    print("SYNTHETIC TEST 2: Immediate Reversal")
+    print("=" * 60)
+    
+    events = pd.DataFrame([{
+        "trend_id": 1,
+        "trend_direction": "Up",
+        "pullback_depth_pct": 2.0,
+        "pullback_duration": 5,
+        "pullback_end_price": 100.0,
+        "pullback_end_idx": 0,
+        "outcome": "reversal"
+    }])
+    
+    prices = np.array([100, 99, 97, 95])
+    df = create_price_dataframe(prices)
+    
+    research = TradeExcursionResearch()
+    research.set_events(events)
+    result = research.run_dataframe(df, dataset_id="synthetic_reversal")
+    
+    mfe = result.statistics.get("mean_mfe", 0)
+    mae = result.statistics.get("mean_mae", 0)
+    
+    print(f"\n  Prices after entry: {prices[1:].tolist()}")
+    print(f"  MFE: {mfe:.2f}% (expected: 0%)")
+    print(f"  MAE: {mae:.2f}% (expected: 5%)")
+    
+    checks_passed = 0
+    
+    if mfe == 0:
+        print(f"  ✓ MFE = 0% (no profit opportunity)")
+        checks_passed += 1
+    
+    if abs(mae - 5.0) < 0.5:
+        print(f"  ✓ MAE correct ({mae:.1f}%)")
+        checks_passed += 1
+    
+    if mae > mfe:
+        print(f"  ✓ MAE > MFE (reversal scenario)")
+        checks_passed += 1
+    
+    print(f"\n  Test: {checks_passed}/3 passed")
+    return checks_passed == 3
+
+
+def test_synthetic_mixed():
+    """
+    Test 3: Mixed scenario with both profit and drawdown.
+    
+    Entry at 100, future: 103, 101, 106, 99, 108
+    MFE = 8% (at 108), MAE = 1% (at 99)
+    """
+    print("\n" + "=" * 60)
+    print("SYNTHETIC TEST 3: Mixed Scenario")
+    print("=" * 60)
+    
+    events = pd.DataFrame([{
+        "trend_id": 1,
+        "trend_direction": "Up",
+        "pullback_depth_pct": 2.0,
+        "pullback_duration": 5,
+        "pullback_end_price": 100.0,
+        "pullback_end_idx": 0,
+        "outcome": "continuation"
+    }])
+    
+    prices = np.array([100, 103, 101, 106, 99, 108])
+    df = create_price_dataframe(prices)
+    
+    research = TradeExcursionResearch()
+    research.set_events(events)
+    result = research.run_dataframe(df, dataset_id="synthetic_mixed")
+    
+    mfe = result.statistics.get("mean_mfe", 0)
+    mae = result.statistics.get("mean_mae", 0)
+    
+    print(f"\n  Prices after entry: {prices[1:].tolist()}")
+    print(f"  MFE: {mfe:.2f}% (expected: 8%)")
+    print(f"  MAE: {mae:.2f}% (expected: 1%)")
+    
+    checks_passed = 0
+    
+    if abs(mfe - 8.0) < 0.5:
+        print(f"  ✓ MFE correct ({mfe:.1f}%)")
+        checks_passed += 1
+    
+    if abs(mae - 1.0) < 0.5:
+        print(f"  ✓ MAE correct ({mae:.1f}%)")
+        checks_passed += 1
+    
+    if mfe > mae:
+        print(f"  ✓ MFE > MAE (favorable)")
+        checks_passed += 1
+    
+    print(f"\n  Test: {checks_passed}/3 passed")
+    return checks_passed == 3
+
+
+def test_compute_mfe_mae_function():
+    """Test the core compute_mfe_mae function directly"""
+    print("\n" + "=" * 60)
+    print("UNIT TEST: compute_mfe_mae()")
+    print("=" * 60)
+    
+    checks_passed = 0
+    
+    # Test 1: Uptrend, prices go up
+    mfe, mae, _, _, _, _ = compute_mfe_mae(100, np.array([102, 104, 106]), "Up")
+    if abs(mfe - 6.0) < 0.01 and mae == 0:
+        print(f"  ✓ Uptrend up: MFE=6%, MAE=0%")
+        checks_passed += 1
+    
+    # Test 2: Uptrend, prices go down
+    mfe, mae, _, _, _, _ = compute_mfe_mae(100, np.array([98, 96, 94]), "Up")
+    if mfe == 0 and abs(mae - 6.0) < 0.01:
+        print(f"  ✓ Uptrend down: MFE=0%, MAE=6%")
+        checks_passed += 1
+    
+    # Test 3: Downtrend, prices go down
+    mfe, mae, _, _, _, _ = compute_mfe_mae(100, np.array([98, 96, 94]), "Down")
+    if abs(mfe - 6.0) < 0.01 and mae == 0:
+        print(f"  ✓ Downtrend down: MFE=6%, MAE=0%")
+        checks_passed += 1
+    
+    # Test 4: Downtrend, prices go up
+    mfe, mae, _, _, _, _ = compute_mfe_mae(100, np.array([102, 104, 106]), "Down")
+    if mfe == 0 and abs(mae - 6.0) < 0.01:
+        print(f"  ✓ Downtrend up: MFE=0%, MAE=6%")
+        checks_passed += 1
+    
+    # Test 5: Mixed
+    mfe, mae, _, _, _, _ = compute_mfe_mae(100, np.array([103, 98, 106]), "Up")
+    if abs(mfe - 6.0) < 0.01 and abs(mae - 2.0) < 0.01:
+        print(f"  ✓ Mixed: MFE=6%, MAE=2%")
+        checks_passed += 1
+    
+    # Test 6: MFE >= 0, MAE >= 0
+    mfe, mae, _, _, _, _ = compute_mfe_mae(100, np.array([100, 100, 100]), "Up")
+    if mfe >= 0 and mae >= 0:
+        print(f"  ✓ Flat: MFE={mfe}%, MAE={mae}% (both ≥ 0)")
+        checks_passed += 1
+    
+    print(f"\n  Unit Tests: {checks_passed}/6 passed")
+    return checks_passed == 6
+
+
+def test_btc_datasets():
+    """Test on BTC real data via full chain"""
+    print("\n" + "=" * 60)
+    print("BTC DATASETS (Full Chain: 005→007→008→009)")
+    print("=" * 60)
+    
+    registry = AtlasRegistry()
+    runner = ModuleRunner(registry=registry)
+    
+    datasets = {
+        "BTC_15m": "data/raw/BTCUSD_15m.csv",
+        "BTC_1h": "data/raw/BTCUSD_1h.csv",
+        "BTC_4h": "data/raw/BTCUSD_4h.csv",
+    }
+    
+    missing = [name for name, path in datasets.items() if not Path(path).exists()]
+    if missing:
+        print(f"\n✗ Missing: {missing}")
+        return False
+    
+    results = runner.run_on_datasets(
+        module_class=TradeExcursionResearch,
+        datasets=datasets,
+        output_base_dir="outputs/module009",
+        validate_after=False
+    )
+    
+    all_passed = True
+    
+    for name, result in results.items():
+        if result.status == "completed":
+            n = result.statistics.get("events_analyzed", 0)
+            mfe = result.statistics.get("mean_mfe", 0)
+            mae = result.statistics.get("mean_mae", 0)
+            rr = result.statistics.get("mean_rr", 0)
+            p_mfe_5 = result.statistics.get("p_mfe_gt_5", 0)
+            
+            print(f"\n  {name}:")
+            print(f"    Events: {n:,}")
+            print(f"    Mean MFE: {mfe:.2f}%")
+            print(f"    Mean MAE: {mae:.2f}%")
+            print(f"    Mean RR: {rr:.2f}")
+            print(f"    P(MFE > 5%): {p_mfe_5}%")
+            
+            if n > 0:
+                print(f"    ✓ Analysis complete")
+            else:
+                print(f"    ⚠ No events")
+        else:
+            print(f"  ✗ {name}: Failed")
+            all_passed = False
+    
+    return all_passed
+
+
+def main():
+    """Test Module 009 Phase 1"""
+    
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 009 PHASE 1 TEST")
+    print("Maximum Favorable / Adverse Excursion")
+    print("=" * 70)
+    
+    print("\n[1/5] Framework health check...")
+    checker = FrameworkChecker()
+    checker.run_all_checks()
+    
+    print("\n[2/5] Unit tests: compute_mfe_mae()...")
+    t0 = test_compute_mfe_mae_function()
+    
+    print("\n[3/5] Synthetic tests...")
+    t1 = test_synthetic_perfect_continuation()
+    t2 = test_synthetic_immediate_reversal()
+    t3 = test_synthetic_mixed()
+    
+    if not (t0 and t1 and t2 and t3):
+        print("\n✗ Synthetic tests failed")
+        return 1
+    
+    print("\n✓ All synthetic tests passed")
+    
+    print("\n[4/5] BTC datasets...")
+    btc_ok = test_btc_datasets()
+    
+    print("\n[5/5] Summary")
+    print("=" * 70)
+    
+    if t0 and t1 and t2 and t3 and btc_ok:
+        print("\n✓ Module 009 Phase 1 validated")
+        print("✓ MFE/MAE calculation correct")
+        print("✓ All edge cases handled")
+        print("✓ Full chain working: 005→007→008→009")
+        return 0
+    else:
+        print("\n⚠ Review results")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

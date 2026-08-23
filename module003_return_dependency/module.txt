@@ -1,0 +1,265 @@
+# atlas/modules/module003_return_dependency/module.py
+"""
+Module 003: Return Dependency Analysis - Phase 1
+Autocorrelation analysis of BTC returns.
+
+Research Question: Do BTC returns exhibit linear dependence?
+Null Hypothesis H0: Returns are independent through time.
+
+Phase 1 measures autocorrelation for lags 1-100.
+"""
+
+import time
+from typing import Dict, Any, Optional
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.core.returns_utils import log_returns
+from atlas.framework.protocol import ResearchProtocol, ModuleStatus, ModuleCategory
+from atlas.framework.registry import AtlasRegistry
+
+from .autocorrelation_engine import AutocorrelationEngine
+from .constants import (
+    MODULE_ID,
+    MODULE_NAME,
+    MODULE_VERSION,
+    MAX_AUTOCORRELATION_LAG,
+    SIGNIFICANCE_LEVEL
+)
+
+# Module metadata
+MODULE_INFO = {
+    "id": MODULE_ID,
+    "title": MODULE_NAME,
+    "author": "Project Atlas",
+    "version": MODULE_VERSION,
+    "category": "Return Analysis",
+    "phase": "Phase 1 - Autocorrelation",
+    "requires": ["000", "001"],
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": [
+        "log_returns",
+        "autocorrelation_function",
+        "significant_lags"
+    ],
+    "max_lag": MAX_AUTOCORRELATION_LAG,
+    "significance_level": SIGNIFICANCE_LEVEL,
+    "null_hypothesis": "H0: Returns are independent through time"
+}
+
+
+class ReturnDependencyResearch(BaseResearchModule):
+    """
+    Module 003 Phase 1: Autocorrelation Analysis.
+    
+    Measures linear dependence in BTC returns using the
+    autocorrelation function (ACF) for lags 1 through 100.
+    
+    Under H0 (independence):
+    - ACF values should be approximately N(0, 1/sqrt(n))
+    - 95% of values within ±1.96/sqrt(n)
+    - ~5 false positives expected at 5% significance
+    
+    Significant excess of values outside confidence bounds
+    indicates return predictability.
+    """
+    
+    PROTOCOL = ResearchProtocol(
+        module_id=MODULE_ID,
+        module_name=MODULE_NAME,
+        category=ModuleCategory.CORRELATION,
+        question="Do BTC returns exhibit linear dependence?",
+        hypothesis="H0: Returns are independent through time. "
+                   "H1: Returns exhibit linear dependence (autocorrelation).",
+        rationale="Return dependency affects market efficiency assessment, "
+                  "trading strategy design, and risk model calibration. "
+                  "If returns are predictable from past returns, this violates "
+                  "the weak form of market efficiency.",
+        methodology="Phase 1: Autocorrelation Analysis\n"
+                   "1. Calculate log returns from close prices\n"
+                   "2. Compute ACF for lags 1-100\n"
+                   "3. Test significance using Bartlett's formula\n"
+                   "4. Identify strongest dependencies\n"
+                   "5. Compare significant lags to expected false positives",
+        statistics=[
+            "Log returns",
+            "ACF values (lags 1-100)",
+            "Significant lags count",
+            "Strongest autocorrelation (lag and value)",
+            "Confidence bounds"
+        ],
+        depends_on=["000", "001"],
+        required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+        author="Project Atlas",
+        version=MODULE_VERSION,
+        status=ModuleStatus.PLANNED,
+        produces=[
+            "autocorrelation_function",
+            "significant_lags"
+        ]
+    )
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(
+            module_name="ReturnDependency",
+            module_version=MODULE_VERSION
+        )
+        self.registry = registry or AtlasRegistry()
+        
+        # Register protocol if not exists
+        existing = self.registry.get_module(MODULE_ID)
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        
+        self._returns: Optional[pd.Series] = None
+        self._acf_engine: Optional[AutocorrelationEngine] = None
+    
+    def _register_pipeline_steps(self):
+        """Register Phase 1 computation steps"""
+        self.pipeline_steps = [
+            ("calculate_returns", self._calculate_returns),
+            ("calculate_autocorrelation", self._calculate_autocorrelation),
+        ]
+    
+    # ============================================================
+    # Phase 1 Methods
+    # ============================================================
+    
+    def _calculate_returns(self) -> Dict[str, Any]:
+        """
+        Step 1: Calculate log returns.
+        
+        Reuses the same calculation as Module001 and Module002.
+        """
+        self.logger.info("Calculating log returns from close prices")
+        
+        self._returns = log_returns(self.df["close"]).dropna()
+        
+        stats = {
+            "observations": len(self._returns),
+            "mean_return": float(self._returns.mean()),
+            "std_return": float(self._returns.std()),
+            "min_return": float(self._returns.min()),
+            "max_return": float(self._returns.max())
+        }
+        
+        self.logger.metric("Observations", f"{stats['observations']:,}")
+        self.logger.metric("Mean return", f"{stats['mean_return']:.8f}")
+        self.logger.metric("Std return", f"{stats['std_return']:.8f}")
+        
+        return stats
+    
+    def _calculate_autocorrelation(self) -> Dict[str, Any]:
+        """
+        Step 2: Compute autocorrelation for lags 1-100.
+        
+        Measures linear correlation between returns separated by k periods.
+        Tests significance using Bartlett's formula (SE = 1/sqrt(n)).
+        """
+        self.logger.info(f"Computing autocorrelation for lags 1-{MAX_AUTOCORRELATION_LAG}")
+        
+        self._acf_engine = AutocorrelationEngine(max_lag=MAX_AUTOCORRELATION_LAG)
+        
+        acf_df = self._acf_engine.compute(self._returns)
+        
+        # Store as artifact
+        self.result.add_artifact("autocorrelation", acf_df)
+        
+        # Display summary
+        self.logger.info("\n" + self._acf_engine.summary(acf_df))
+        
+        # Build statistics
+        stats = {}
+        
+        # Confidence bounds
+        bounds = self._acf_engine.get_confidence_bounds()
+        stats['standard_error'] = bounds.get('standard_error', 0)
+        stats['lower_95ci'] = bounds.get('lower_95ci', 0)
+        stats['upper_95ci'] = bounds.get('upper_95ci', 0)
+        
+        # Significant lags
+        significant = self._acf_engine.get_significant_lags(acf_df)
+        stats['significant_lags_count'] = len(significant)
+        stats['expected_false_positives'] = MAX_AUTOCORRELATION_LAG * SIGNIFICANCE_LEVEL
+        
+        # Strongest autocorrelation
+        strongest_idx = acf_df["abs_autocorrelation"].idxmax()
+        strongest = acf_df.iloc[strongest_idx]
+        
+        stats['strongest_lag'] = int(strongest["lag"])
+        stats['strongest_autocorrelation'] = float(strongest["autocorrelation"])
+        stats['strongest_abs_autocorrelation'] = float(strongest["abs_autocorrelation"])
+        stats['strongest_significant'] = bool(strongest["significant"])
+        
+        # Summary statistics of ACF values
+        stats['acf_mean'] = float(acf_df['autocorrelation'].mean())
+        stats['acf_std'] = float(acf_df['autocorrelation'].std())
+        stats['acf_min'] = float(acf_df['autocorrelation'].min())
+        stats['acf_max'] = float(acf_df['autocorrelation'].max())
+        
+        # Lags with strongest absolute correlation (top 5)
+        strongest_5 = self._acf_engine.get_strongest_lags(acf_df, n=5)
+        for i, (_, row) in enumerate(strongest_5.iterrows(), 1):
+            stats[f'top{i}_lag'] = int(row['lag'])
+            stats[f'top{i}_acf'] = float(row['autocorrelation'])
+        
+        # Evidence assessment
+        n_sig = stats['significant_lags_count']
+        expected = stats['expected_false_positives']
+        
+        self.logger.info(f"\nSignificant lags: {n_sig}/{MAX_AUTOCORRELATION_LAG}")
+        self.logger.info(f"Expected under H0: ~{expected:.1f}")
+        
+        if n_sig > expected * 2:
+            self.logger.info("Evidence AGAINST H0 - returns are NOT independent")
+        else:
+            self.logger.info("Cannot reject H0 - returns appear independent")
+        
+        return stats
+    
+    # ============================================================
+    # EXPORT
+    # ============================================================
+    
+    def export(self, output_dir: str) -> None:
+        """Export Phase 1 artifacts"""
+        start_time = time.time()
+        self.logger.section("Exporting Results")
+        
+        from atlas.core.export_manager import ExportManager
+        exporter = ExportManager(output_dir)
+        
+        # Standard exports
+        exporter.export_statistics(self.result)
+        exporter.export_report(self.result)
+        
+        # ACF data
+        if 'autocorrelation' in self.result.artifacts:
+            exporter.export_dataframe(
+                self.result.artifacts['autocorrelation'],
+                "autocorrelation.csv"
+            )
+        
+        self.result.add_timing('export', time.time() - start_time)
+        self.logger.success(f"Exported to: {output_dir}")
+    
+    def compute(self) -> Dict[str, Any]:
+        """Execute pipeline steps"""
+        all_results = {}
+        
+        for step_name, step_func in self.pipeline_steps:
+            self.logger.info(f"Step: {step_name}")
+            step_result = step_func()
+            all_results.update(step_result)
+        
+        all_results['phase1_complete'] = True
+        self.logger.success("Phase 1 complete")
+        
+        return all_results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        """Execute research for a single dataset"""
+        return super().run(filepath, output_dir)

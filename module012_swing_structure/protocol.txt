@@ -1,0 +1,87 @@
+# atlas/modules/module012_swing_structure/protocol.py
+"""
+Module 012 Research Protocol
+Swing Structure Analysis
+
+Science only. No code.
+"""
+
+from atlas.framework.protocol import ResearchProtocol, ModuleCategory
+from .config import MODULE_VERSION
+
+PROTOCOL = ResearchProtocol(
+    module_id="012",
+    module_name="Swing Structure",
+    category=ModuleCategory.MICROSTRUCTURE,
+    
+    question=(
+        "How does BTC naturally organize into swing highs and swing lows, "
+        "and what statistical properties do those swings exhibit?"
+    ),
+    
+    hypothesis=(
+        "BTC price action organizes into measurable swing structures. "
+        "Swing size, duration, and frequency exhibit statistical regularities "
+        "that vary across timeframes."
+    ),
+    
+    rationale=(
+        "Swing structure represents the natural geometry of price movement. "
+        "Understanding swing behavior is foundational for market structure analysis, "
+        "support/resistance identification, and liquidity assessment. "
+        "This module measures swings objectively without ICT, SMC, or ZigZag concepts."
+    ),
+    
+    methodology=(
+        "Phase 1.0: Skeleton architecture\n"
+        "Phase 1.1: Fractal swing detection (k=2)\n"
+        "  - Swing High: High(i) > High(i-k..i-1) AND High(i) > High(i+1..i+k)\n"
+        "  - Swing Low: Low(i) < Low(i-k..i-1) AND Low(i) < Low(i+1..i+k)\n"
+        "Phase 1.2: Swing sequence construction\n"
+        "Phase 1.3: Swing statistics (amplitude, duration, HH/HL/LH/LL)\n"
+        "Phase 1.4: Cross-timeframe comparison\n"
+        "\n"
+        "Note: Fractal detection uses future bars for confirmation.\n"
+        "This is acceptable for research purposes."
+    ),
+    
+    statistics=[
+        "Total swing highs",
+        "Total swing lows",
+        "Average swing distance (%)",
+        "Median swing distance",
+        "Maximum swing distance",
+        "Average swing duration",
+        "Median swing duration",
+        "HH count (higher high)",
+        "HL count (higher low)",
+        "LH count (lower high)",
+        "LL count (lower low)",
+    ],
+    
+    depends_on=["000"],
+    required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+    
+    author="Project Atlas",
+    version=MODULE_VERSION,
+    
+    produces=[
+        "swing_points",
+        "swing_statistics",
+        "swing_summary",
+    ],
+    
+    limitations=[
+        "Fractal detection introduces k-bar confirmation lag",
+        "Swing definition uses strict inequality (no equal highs/lows)",
+        "Minimum swing distance not yet enforced",
+        "Swing detection is not causal (uses future bars)",
+    ],
+    
+    future_research=[
+        "Swing volume profile analysis",
+        "Swing-conditional breakout behavior",
+        "Multi-timeframe swing alignment",
+        "Causal swing detection for strategy modules",
+    ]
+)

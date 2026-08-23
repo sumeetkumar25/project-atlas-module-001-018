@@ -1,0 +1,327 @@
+# atlas/modules/module005_trend_persistence/test_module.py
+"""
+Module 005 Phase 1 Test Runner
+
+Validates trend segmentation on synthetic data and BTC datasets.
+
+Synthetic tests use MIN_TREND_LENGTH=1 to validate the segmentation
+engine independently of the filtering logic.
+"""
+
+import sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+from atlas.modules.module005_trend_persistence.module import TrendPersistenceResearch
+from atlas.runner import ModuleRunner
+from atlas.framework.registry import AtlasRegistry
+from atlas.framework.framework_check import FrameworkChecker
+
+
+def create_price_dataframe(returns: np.ndarray, initial_price: float = 100.0) -> pd.DataFrame:
+    """Create OHLCV DataFrame from return series"""
+    n = len(returns)
+    log_price = np.log(initial_price) + np.cumsum(returns)
+    price = np.exp(log_price)
+    price = np.maximum(price, 1e-10)
+    
+    dates = pd.date_range(start="2020-01-01", periods=n, freq="15min")
+    
+    return pd.DataFrame({
+        "timestamp": dates,
+        "open": price,
+        "high": price * 1.001,
+        "low": price * 0.999,
+        "close": price,
+        "volume": np.ones(n) * 100
+    })
+
+
+def test_synthetic_alternating():
+    """
+    Test 1: Alternating up/down returns.
+    
+    Uses MIN_TREND_LENGTH=1 for validation.
+    Each candle alternates direction → every candle is its own segment.
+    
+    Expected: 999 segments, mean length = 1.0
+    """
+    print("\n" + "=" * 60)
+    print("SYNTHETIC TEST 1: Alternating Directions")
+    print("=" * 60)
+    print("  Validation mode: MIN_TREND_LENGTH=1")
+    
+    np.random.seed(42)
+    n = 1000
+    
+    # Create alternating positive/negative returns
+    returns = np.array([0.01, -0.01] * (n // 2))
+    
+    df = create_price_dataframe(returns)
+    
+    research = TrendPersistenceResearch()
+    
+    # Temporarily set MIN_TREND_LENGTH=1 for validation
+    research.MIN_TREND_LENGTH = 1
+    
+    result = research.run_dataframe(df, dataset_id="synthetic_alternating")
+    
+    n_segments = result.statistics.get("total_segments", 0)
+    mean_length = result.statistics.get("mean_trend_length", 0)
+    up_segments = result.statistics.get("up_trend_count", 0)
+    down_segments = result.statistics.get("down_trend_count", 0)
+    
+    print(f"\n  Segments: {n_segments} ({up_segments} up, {down_segments} down)")
+    print(f"  Mean length: {mean_length:.2f}")
+    
+    checks_passed = 0
+    
+    # 1000 returns → 999 segments (each candle is its own segment)
+    # Actually: 1000 returns, first candle starts segment, then 999 transitions
+    # Each candle is length 1 → 1000 segments (one per candle)
+    expected_segments = n  # Each candle is its own segment of length 1
+    
+    if n_segments >= expected_segments * 0.95:
+        print(f"  ✓ Correct segment count ({n_segments} ≈ {expected_segments})")
+        checks_passed += 1
+    else:
+        print(f"  ✗ Expected ~{expected_segments} segments, got {n_segments}")
+    
+    # Each segment should be length 1
+    if 0.9 <= mean_length <= 1.1:
+        print(f"  ✓ Mean length = 1.0 ({mean_length:.2f})")
+        checks_passed += 1
+    else:
+        print(f"  ✗ Expected mean=1.0, got {mean_length:.2f}")
+    
+    # Up and down should be roughly equal
+    if abs(up_segments - down_segments) <= 2:
+        print(f"  ✓ Up ({up_segments}) ≈ Down ({down_segments})")
+        checks_passed += 1
+    else:
+        print(f"  ✗ Expected equal up/down, got {up_segments}/{down_segments}")
+    
+    print(f"\n  Alternating Test: {checks_passed}/3 passed")
+    return checks_passed == 3
+
+
+def test_synthetic_clustered():
+    """
+    Test 2: Clustered directions (persistent trends).
+    
+    Creates long runs of same-direction returns.
+    Expected: Few segments with long mean length.
+    """
+    print("\n" + "=" * 60)
+    print("SYNTHETIC TEST 2: Clustered Directions (Persistent)")
+    print("=" * 60)
+    print("  Validation mode: MIN_TREND_LENGTH=1")
+    
+    np.random.seed(42)
+    
+    # Create clustered returns: long runs of same direction
+    returns = []
+    run_lengths = [20, 15, 30, 10, 25, 18, 22, 12, 28, 16]
+    directions = [0.01, -0.01, 0.01, -0.01, 0.01, -0.01, 0.01, -0.01, 0.01, -0.01]
+    
+    for length, direction in zip(run_lengths, directions):
+        returns.extend([direction] * length)
+    
+    returns = np.array(returns)
+    total_candles = len(returns)
+    
+    df = create_price_dataframe(returns)
+    
+    research = TrendPersistenceResearch()
+    research.MIN_TREND_LENGTH = 1  # Validation mode
+    
+    result = research.run_dataframe(df, dataset_id="synthetic_clustered")
+    
+    n_segments = result.statistics.get("total_segments", 0)
+    mean_length = result.statistics.get("mean_trend_length", 0)
+    max_length = result.statistics.get("max_trend_length", 0)
+    up_count = result.statistics.get("up_trend_count", 0)
+    down_count = result.statistics.get("down_trend_count", 0)
+    
+    print(f"\n  Segments: {n_segments} ({up_count} up, {down_count} down)")
+    print(f"  Mean length: {mean_length:.2f}")
+    print(f"  Max length: {max_length}")
+    
+    checks_passed = 0
+    
+    # Should have exactly 10 segments (one per run)
+    if n_segments == 10:
+        print(f"  ✓ Exactly 10 segments detected")
+        checks_passed += 1
+    else:
+        print(f"  ✗ Expected 10 segments, got {n_segments}")
+    
+    # Mean length = total candles / segments
+    expected_mean = total_candles / 10
+    if abs(mean_length - expected_mean) < 1.0:
+        print(f"  ✓ Mean length correct ({mean_length:.1f} ≈ {expected_mean:.1f})")
+        checks_passed += 1
+    else:
+        print(f"  ✗ Expected mean ~{expected_mean:.1f}, got {mean_length:.1f}")
+    
+    # Max length should be 30 (longest run)
+    if max_length == 30:
+        print(f"  ✓ Max length = 30 (correct)")
+        checks_passed += 1
+    else:
+        print(f"  ✗ Expected max=30, got {max_length}")
+    
+    # Up/down split
+    if up_count == 5 and down_count == 5:
+        print(f"  ✓ Equal up/down (5 each)")
+        checks_passed += 1
+    else:
+        print(f"  ✗ Expected 5/5 split, got {up_count}/{down_count}")
+    
+    print(f"\n  Clustered Test: {checks_passed}/4 passed")
+    return checks_passed == 4
+
+
+def test_synthetic_empty():
+    """
+    Test 3: All flat returns → no trends.
+    
+    Validates that the module handles edge cases gracefully.
+    """
+    print("\n" + "=" * 60)
+    print("SYNTHETIC TEST 3: All Flat (No Trends)")
+    print("=" * 60)
+    
+    n = 100
+    returns = np.zeros(n)
+    
+    df = create_price_dataframe(returns)
+    
+    research = TrendPersistenceResearch()
+    result = research.run_dataframe(df, dataset_id="synthetic_flat")
+    
+    n_segments = result.statistics.get("total_segments", 0)
+    
+    print(f"\n  Segments: {n_segments}")
+    
+    if n_segments == 0:
+        print(f"  ✓ Correctly detected no trends")
+        return True
+    else:
+        print(f"  ✗ Expected 0 segments, got {n_segments}")
+        return False
+
+
+def test_btc_datasets():
+    """Test 4: BTC real data (with production MIN_TREND_LENGTH=3)"""
+    print("\n" + "=" * 60)
+    print("BTC DATASETS")
+    print("=" * 60)
+    print("  Production mode: MIN_TREND_LENGTH=3")
+    
+    registry = AtlasRegistry()
+    runner = ModuleRunner(registry=registry)
+    
+    datasets = {
+        "BTC_15m": "data/raw/BTCUSD_15m.csv",
+        "BTC_1h": "data/raw/BTCUSD_1h.csv",
+        "BTC_4h": "data/raw/BTCUSD_4h.csv",
+    }
+    
+    missing = [name for name, path in datasets.items() if not Path(path).exists()]
+    if missing:
+        print(f"\n✗ Missing: {missing}")
+        return False
+    
+    results = runner.run_on_datasets(
+        module_class=TrendPersistenceResearch,
+        datasets=datasets,
+        output_base_dir="outputs/module005",
+        validate_after=False
+    )
+    
+    all_passed = True
+    
+    for name, result in results.items():
+        if result.status == "completed":
+            n_segments = result.statistics.get("total_segments", 0)
+            mean_len = result.statistics.get("mean_trend_length", 0)
+            median_len = result.statistics.get("median_trend_length", 0)
+            max_len = result.statistics.get("max_trend_length", 0)
+            ratio = result.statistics.get("observed_vs_expected_ratio", 0)
+            expected = result.statistics.get("expected_length_under_h0", 0)
+            up_count = result.statistics.get("up_trend_count", 0)
+            down_count = result.statistics.get("down_trend_count", 0)
+            
+            print(f"\n  {name}:")
+            print(f"    Segments: {n_segments:,} ({up_count} up, {down_count} down)")
+            print(f"    Mean length: {mean_len:.2f}")
+            print(f"    Median length: {median_len:.1f}")
+            print(f"    Max length: {max_len}")
+            print(f"    Expected under H0: {expected:.2f}")
+            print(f"    Ratio: {ratio:.2f}x")
+            
+            if ratio > 1.5:
+                print(f"    ✓ Strong trend persistence detected")
+            elif ratio > 1.2:
+                print(f"    ○ Moderate trend persistence")
+            else:
+                print(f"    ○ Near random expectation")
+        else:
+            print(f"  ✗ {name}: Failed")
+            all_passed = False
+    
+    return all_passed
+
+
+def main():
+    """Test Module 005 Phase 1"""
+    
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 005 PHASE 1 TEST")
+    print("Trend Persistence - Trend Segmentation")
+    print("=" * 70)
+    print("\n  Synthetic tests: MIN_TREND_LENGTH=1 (validate segmentation)")
+    print("  BTC data: MIN_TREND_LENGTH=3 (production setting)")
+    
+    # Framework check
+    print("\n[1/4] Framework health check...")
+    checker = FrameworkChecker()
+    checker.run_all_checks()
+    
+    # Synthetic tests
+    print("\n[2/4] Synthetic validation...")
+    t1 = test_synthetic_alternating()
+    t2 = test_synthetic_clustered()
+    t3 = test_synthetic_empty()
+    
+    if not (t1 and t2 and t3):
+        print("\n✗ Synthetic tests failed")
+        return 1
+    
+    print("\n✓ All synthetic tests passed")
+    
+    # BTC data
+    print("\n[3/4] BTC datasets...")
+    btc_ok = test_btc_datasets()
+    
+    # Summary
+    print("\n[4/4] Summary")
+    print("=" * 70)
+    
+    if t1 and t2 and t3 and btc_ok:
+        print("\n✓ Module 005 Phase 1 validated")
+        print("✓ Trend segmentation engine working correctly")
+        print("✓ Edge cases handled gracefully")
+        print("\n✓ Ready for Phase 2 (pullback detection)")
+        return 0
+    else:
+        print("\n⚠ Review results")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

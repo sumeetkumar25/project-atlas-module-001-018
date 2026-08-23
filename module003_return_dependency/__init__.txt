@@ -1,0 +1,5 @@
+# atlas/modules/module003_return_dependency/__init__.py
+"""
+Module 003: Return Dependency Analysis
+Tests whether BTC returns exhibit linear dependence.
+"""

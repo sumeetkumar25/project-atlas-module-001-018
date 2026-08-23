@@ -1,0 +1,269 @@
+# atlas/modules/module017_volume_behaviour/module.py
+"""
+Module 017
+Volume Behaviour
+
+All 7 steps implemented.
+FIXED: Occupancy exported with named columns. Uses state label constants.
+"""
+
+from typing import Optional, List, Dict, Any
+
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from atlas.core.volume import (
+    VolumeCleaner,
+    VolumeNormalizer,
+    VolumePercentiles,
+    VolumeStateClassifier,
+    VolumeSegments,
+    VolumeStatistics,
+)
+from atlas.core.volume.states import STATE_LABELS
+
+from .config import *
+from .protocol import PROTOCOL
+
+
+class VolumeBehaviourResearch(BaseResearchModule):
+
+    PROTOCOL = PROTOCOL
+
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+
+        super().__init__(
+            module_name=MODULE_NAME,
+            module_version=MODULE_VERSION,
+        )
+
+        self.registry = registry or AtlasRegistry()
+
+        existing = self.registry.get_module(MODULE_ID)
+        if not existing:
+            self.registry.register_module(PROTOCOL)
+
+        self.cleaned_volume = None
+        self.normalized_volume = None
+        self.percentile = None
+        self.state = None
+        self.segments = None
+
+    def _register_pipeline_steps(self):
+
+        self.pipeline_steps = [
+            ("clean", self._clean_volume),
+            ("normalize", self._normalize_volume),
+            ("percentile", self._percentile),
+            ("state", self._state),
+            ("segments", self._segments),
+            ("statistics", self._statistics),
+            ("export", self._export),
+        ]
+
+    # ---- Step 1: Clean ----
+    def _clean_volume(self) -> Dict[str, Any]:
+
+        self.logger.info("Step 1: Cleaning volume")
+
+        self.cleaned_volume = VolumeCleaner.clean(self.df["volume"])
+        self.df["clean_volume"] = self.cleaned_volume
+
+        self.result.artifacts["clean_volume"] = (
+            self.df[["timestamp", "clean_volume"]].copy()
+        )
+
+        self.logger.metric("Observations", f"{len(self.cleaned_volume):,}")
+        self.logger.metric("Zero volume", f"{int((self.cleaned_volume == 0).sum()):,}")
+        self.logger.success("Volume cleaning complete")
+
+        return {
+            "clean_status": "complete",
+            "observations": len(self.cleaned_volume),
+            "zero_volume": int((self.cleaned_volume == 0).sum()),
+        }
+
+    # ---- Step 2: Normalize ----
+    def _normalize_volume(self) -> Dict[str, Any]:
+
+        self.logger.info("Step 2: Normalizing volume")
+
+        self.normalized_volume = VolumeNormalizer.normalize(
+            self.cleaned_volume, NORMALIZATION_WINDOW
+        )
+        self.df["normalized_volume"] = self.normalized_volume
+
+        self.result.artifacts["normalized_volume"] = (
+            self.df[["timestamp", "normalized_volume"]].copy()
+        )
+
+        valid = self.normalized_volume.dropna()
+
+        self.logger.metric("Valid observations", f"{len(valid):,}")
+        self.logger.metric("Mean", f"{valid.mean():.4f}")
+        self.logger.success("Normalization complete")
+
+        return {
+            "normalization_status": "complete",
+            "valid": len(valid),
+            "mean": float(valid.mean()),
+        }
+
+    # ---- Step 3: Percentiles ----
+    def _percentile(self) -> Dict[str, Any]:
+
+        self.logger.info("Step 3: Percentiles")
+
+        self.percentile = VolumePercentiles.rolling_percentile(
+            self.normalized_volume, PERCENTILE_WINDOW
+        )
+        self.df["volume_percentile"] = self.percentile
+
+        self.result.artifacts["volume_percentile"] = (
+            self.df[["timestamp", "volume_percentile"]].copy()
+        )
+
+        valid = self.percentile.dropna()
+
+        self.logger.metric("Valid percentiles", f"{len(valid):,}")
+        self.logger.metric("Mean percentile", f"{valid.mean():.2f}")
+        self.logger.success("Percentiles complete")
+
+        return {
+            "percentile_status": "complete",
+            "valid_percentiles": len(valid),
+        }
+
+    # ---- Step 4: States ----
+    def _state(self) -> Dict[str, Any]:
+
+        self.logger.info("Step 4: Volume states")
+
+        self.state = VolumeStateClassifier.classify(self.percentile)
+        self.df["volume_state"] = self.state
+
+        self.result.artifacts["volume_states"] = (
+            self.df[["timestamp", "volume_state"]].copy()
+        )
+
+        counts = self.state.value_counts().sort_index()
+        state_counts = {}
+        for label in STATE_LABELS:
+            count = int(counts.get(label, 0))
+            key = label.lower().replace(" ", "_")
+            state_counts[key] = count
+            self.logger.metric(f"  {label}", f"{count:>,}")
+
+        self.logger.success("State classification complete")
+
+        return {
+            "state_status": "complete",
+            **state_counts,
+        }
+
+    # ---- Step 5: Segments ----
+    def _segments(self) -> Dict[str, Any]:
+
+        self.logger.info("Step 5: Detecting volume segments")
+
+        self.segments = VolumeSegments.detect(self.state)
+        self.result.artifacts["volume_segments"] = self.segments.copy()
+
+        count = len(self.segments)
+        mean_duration = self.segments["duration"].mean() if count else 0
+        max_duration = self.segments["duration"].max() if count else 0
+
+        self.logger.metric("Segments", f"{count:,}")
+        self.logger.metric("Mean duration", f"{mean_duration:.2f}")
+        self.logger.metric("Max duration", f"{max_duration}")
+        self.logger.success("Segment detection complete")
+
+        return {
+            "segments_status": "complete",
+            "segment_count": count,
+            "mean_duration": float(mean_duration),
+            "max_duration": int(max_duration),
+        }
+
+    # ---- Step 6: Statistics ----
+    def _statistics(self) -> Dict[str, Any]:
+
+        self.logger.info("Step 6: Behaviour statistics")
+
+        occupancy = VolumeStatistics.occupancy(self.state)
+        self.result.artifacts["volume_occupancy"] = occupancy.reset_index()
+
+        duration_stats = VolumeStatistics.duration(self.segments)
+        self.result.artifacts["volume_statistics"] = pd.DataFrame([duration_stats])
+
+        counts, probs = VolumeStatistics.transition_matrix(self.segments)
+        self.result.artifacts["transition_counts"] = counts
+        self.result.artifacts["transition_probabilities"] = probs
+
+        dist = VolumeStatistics.duration_distribution(self.segments)
+        self.result.artifacts["duration_distribution"] = dist
+
+        self.logger.metric("Segment count", f"{duration_stats['segment_count']:,}")
+        self.logger.metric("Mean duration", f"{duration_stats['mean_duration']:.2f}")
+        self.logger.metric("Median duration", f"{duration_stats['median_duration']:.2f}")
+        self.logger.metric("Max duration", f"{duration_stats['max_duration']}")
+        self.logger.metric("P95 duration", f"{duration_stats['p95_duration']:.2f}")
+
+        self.logger.info("\n  Transition Probability Matrix:")
+        states_list = list(probs.index)
+        header = "FROM" + "".join(f"{s:>12}" for s in states_list)
+        self.logger.info(f"    {header}")
+        for from_s in states_list:
+            row_str = f"    {from_s:<10}"
+            for to_s in states_list:
+                if counts.loc[from_s].sum() > 0:
+                    row_str += f"{probs.loc[from_s, to_s]:>12.3f}"
+                else:
+                    row_str += f"{'─':>12}"
+            self.logger.info(row_str)
+
+        self.logger.success("Statistics complete")
+
+        return {
+            "statistics_status": "complete",
+            **duration_stats,
+        }
+
+    # ---- Step 7: Export ----
+    def _export(self) -> Dict[str, Any]:
+
+        self.logger.info("Step 7: Export")
+
+        exported = len(self.result.artifacts)
+
+        self.logger.metric("Artifacts exported", f"{exported}")
+        for name in sorted(self.result.artifacts.keys()):
+            artifact = self.result.artifacts[name]
+            if isinstance(artifact, pd.DataFrame):
+                self.logger.info(f"  {name}: {len(artifact):,} rows")
+
+        self.logger.success("Export complete")
+
+        return {
+            "export_status": "complete",
+            "artifact_count": exported,
+        }
+
+    def compute(self) -> Dict[str, Any]:
+
+        self.logger.section("Executing Pipeline")
+        self.logger.info("All seven steps implemented")
+
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 017 complete")
+
+        return results
+
+    def run(self, filepath: str, output_dir=None):
+        return super().run(filepath, output_dir)
+
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        return super().run_dataframe(df, dataset_id, output_dir)

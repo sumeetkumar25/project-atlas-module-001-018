@@ -1,0 +1,74 @@
+# atlas/modules/module015_compression/protocol.py
+"""
+Module 015 Research Protocol
+Compression Analysis
+"""
+
+from atlas.framework.protocol import ResearchProtocol, ModuleCategory
+from .config import MODULE_VERSION
+
+PROTOCOL = ResearchProtocol(
+    module_id="015",
+    module_name="Compression Analysis",
+    category=ModuleCategory.VOLATILITY,
+    
+    question=(
+        "What happens after BTC enters a compression (low range) state? "
+        "How long does compression persist, and what directional moves follow?"
+    ),
+    
+    hypothesis=(
+        "Compression periods precede directional expansion. "
+        "The duration and depth of compression influences subsequent "
+        "price movement magnitude and direction."
+    ),
+    
+    rationale=(
+        "Compression represents market indecision and energy building. "
+        "Understanding post-compression behavior is essential for "
+        "anticipating breakout direction and magnitude."
+    ),
+    
+    methodology=(
+        "Phase 1: Compression Detection & Analysis\n"
+        "1. Identify compression states from Module 013 range percentiles\n"
+        "2. Detect contiguous compression segments\n"
+        "3. Compute duration statistics\n"
+        "4. Measure post-compression price movement\n"
+        "5. Export results\n\n"
+        "Reuses atlas.core.volatility for ATR/percentile calculations."
+    ),
+    
+    statistics=[
+        "Compression frequency",
+        "Compression duration (mean, median, max, P95, P99)",
+        "Post-compression directional bias",
+        "Post-compression move magnitude",
+        "Expansion probability after compression",
+    ],
+    
+    depends_on=["000", "013"],
+    required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+    
+    author="Project Atlas",
+    version=MODULE_VERSION,
+    
+    produces=[
+        "compression_state",
+        "compression_segments",
+        "compression_statistics",
+        "post_compression_moves",
+    ],
+    
+    limitations=[
+        "Compression threshold is fixed at 25th percentile",
+        "Post-compression lookahead is fixed",
+        "Does not account for macro market context",
+    ],
+    
+    future_research=[
+        "Compression depth analysis",
+        "Multi-timeframe compression alignment",
+        "Compression-conditional breakout strategies",
+    ]
+)

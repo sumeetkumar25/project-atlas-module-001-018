@@ -1,0 +1,42 @@
+# atlas/modules/module009_trade_excursion/metadata.py
+"""
+Module 009 Metadata
+Maximum Favorable / Adverse Excursion Analysis
+"""
+
+MODULE_ID = "009"
+MODULE_NAME = "Maximum Favorable Excursion"
+MODULE_VERSION = "0.1.0"
+
+MODULE_INFO = {
+    "id": MODULE_ID,
+    "name": MODULE_NAME,
+    "version": MODULE_VERSION,
+    "author": "Project Atlas",
+    "phase": "Phase 1 - MFE/MAE Measurement",
+    "category": "Trade Statistics",
+    "requires": ["001", "005", "007", "008"],
+    "depends_on_artifact": "Module 008 continuation_events (via set_events)",
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": [
+        "excursion_events",
+        "reward_risk",
+        "mfe_distribution",
+        "mae_distribution"
+    ],
+    "research_question": (
+        "After a pullback entry, how much favorable excursion (profit potential) "
+        "and adverse excursion (risk) does each trade experience?"
+    ),
+    "null_hypothesis": "MFE and MAE are symmetric (no edge in either direction).",
+    "note": "Consumes Module 008 events in-memory via set_events(). No disk I/O for testing."
+}
+
+# Configuration
+LOOKAHEAD_BARS = 100
+
+# MFE distribution thresholds
+MFE_THRESHOLDS = [0.5, 1.0, 2.0, 3.0, 5.0, 10.0]
+
+# MAE distribution thresholds
+MAE_THRESHOLDS = [0.5, 1.0, 2.0, 3.0, 5.0, 10.0]

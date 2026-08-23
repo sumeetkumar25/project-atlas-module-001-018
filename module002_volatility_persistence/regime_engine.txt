@@ -1,0 +1,143 @@
+# atlas/modules/module002_volatility_persistence/regime_engine.py
+"""
+Volatility Regime Engine - Phase 2
+
+Classifies volatility observations into discrete regimes using
+percentile-based thresholds. This adaptive approach automatically
+adjusts to different timeframes without hardcoded values.
+"""
+
+import numpy as np
+import pandas as pd
+from typing import List
+
+
+class VolatilityRegimeEngine:
+    """
+    Percentile-based volatility regime classifier.
+    
+    Unlike fixed-threshold approaches (e.g., "High if std > 0.02"),
+    this engine uses percentile boundaries that adapt to each
+    timeframe's volatility distribution.
+    
+    Regimes:
+    - VL (Very Low):  0-20th percentile
+    - L  (Low):      20-40th percentile
+    - M  (Medium):   40-60th percentile
+    - H  (High):     60-80th percentile
+    - E  (Extreme):  80-100th percentile
+    
+    This ensures roughly equal representation across regimes
+    regardless of the asset or timeframe.
+    """
+    
+    def __init__(self, labels: List[str], percentiles: List[float]):
+        """
+        Initialize regime engine.
+        
+        Args:
+            labels: Regime labels (e.g., ["VL", "L", "M", "H", "E"])
+            percentiles: Percentile boundaries (e.g., [20, 40, 60, 80])
+        """
+        if len(labels) != len(percentiles) + 1:
+            raise ValueError(
+                f"Expected {len(percentiles) + 1} labels for {len(percentiles)} "
+                f"percentile boundaries, got {len(labels)} labels"
+            )
+        
+        self.labels = labels
+        self.percentiles = percentiles
+        self.boundaries: List[float] = []
+    
+    def fit(self, volatility_series: pd.Series):
+        """
+        Compute percentile boundaries from data.
+        
+        Args:
+            volatility_series: Volatility observations (can contain NaN)
+        """
+        clean = volatility_series.dropna()
+        
+        if len(clean) == 0:
+            raise ValueError("No non-NaN values in volatility series")
+        
+        # Compute percentile boundaries
+        self.boundaries = np.percentile(clean, self.percentiles).tolist()
+        
+        return self
+    
+    def classify(self, volatility_series: pd.Series) -> pd.DataFrame:
+        """
+        Classify each observation into a regime.
+        
+        Args:
+            volatility_series: Volatility observations to classify
+            
+        Returns:
+            DataFrame with columns:
+            - rolling_volatility: Original volatility values
+            - volatility_percentile: Percentile rank (0-100)
+            - regime: Regime label (VL, L, M, H, E)
+        """
+        # Fit boundaries if not already done
+        if not self.boundaries:
+            self.fit(volatility_series)
+        
+        # Create bin edges including -inf and +inf
+        bins = [-np.inf] + self.boundaries + [np.inf]
+        
+        # Classify each observation
+        regimes = pd.cut(
+            volatility_series,
+            bins=bins,
+            labels=self.labels,
+            include_lowest=True
+        )
+        
+        # Compute percentile rank for each observation
+        percentile_rank = volatility_series.rank(pct=True) * 100
+        
+        return pd.DataFrame({
+            "rolling_volatility": volatility_series,
+            "volatility_percentile": percentile_rank,
+            "regime": regimes
+        })
+    
+    def get_boundaries(self) -> dict:
+        """
+        Get the computed boundary values.
+        
+        Returns:
+            Dictionary mapping regime labels to their upper bounds
+        """
+        if not self.boundaries:
+            return {}
+        
+        bounds = {}
+        for i, label in enumerate(self.labels):
+            if i == 0:
+                bounds[f"{label}_upper"] = self.boundaries[0]
+            elif i == len(self.labels) - 1:
+                bounds[f"{label}_lower"] = self.boundaries[-1]
+            else:
+                bounds[f"{label}_range"] = f"{self.boundaries[i-1]:.6f} - {self.boundaries[i]:.6f}"
+        
+        return bounds
+    
+    def summary(self) -> str:
+        """Generate human-readable summary of regime boundaries"""
+        if not self.boundaries:
+            return "Regime engine not yet fitted"
+        
+        lines = []
+        lines.append("Volatility Regime Boundaries:")
+        
+        for i, label in enumerate(self.labels):
+            if i == 0:
+                lines.append(f"  {label}: ≤ {self.boundaries[0]:.6f}")
+            elif i == len(self.labels) - 1:
+                lines.append(f"  {label}: > {self.boundaries[-1]:.6f}")
+            else:
+                lines.append(f"  {label}: {self.boundaries[i-1]:.6f} - {self.boundaries[i]:.6f}")
+        
+        return "\n".join(lines)

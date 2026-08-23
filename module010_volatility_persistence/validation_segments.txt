@@ -1,0 +1,483 @@
+# atlas/modules/module010_volatility_persistence/validation_segments.py
+"""
+Atlas Segment Detection Validator
+Permanent validation for volatility regime segmentation.
+
+Validates run-length encoding of state sequences:
+- Contiguous same-state bars form one segment
+- NaN values are skipped (no segments created)
+- Every valid state belongs to exactly one segment
+- No overlaps, no gaps, durations sum correctly
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Tuple, List
+
+
+def validate_segments(segments: pd.DataFrame,
+                       states: pd.Series,
+                       valid_state_count: int) -> Tuple[bool, List[str]]:
+    """
+    Validate a segment DataFrame against source states.
+    
+    Checks:
+    - Required columns present
+    - Segment IDs are unique
+    - All durations are positive
+    - Sum of durations equals valid state count
+    - Every segment start <= end
+    - No overlapping segments
+    
+    Args:
+        segments: Segment DataFrame with columns [segment_id, state, duration_bars, start_index, end_index]
+        states: Original state series
+        valid_state_count: Number of non-NaN states
+        
+    Returns:
+        (is_valid, list_of_warnings)
+    """
+    warnings = []
+    is_valid = True
+    
+    required_cols = ['segment_id', 'state', 'duration_bars', 'start_index', 'end_index']
+    missing = [c for c in required_cols if c not in segments.columns]
+    if missing:
+        warnings.append(f"Missing columns: {missing}")
+        return False, warnings
+    
+    # Check 1: Segment IDs are unique
+    if segments['segment_id'].duplicated().any():
+        warnings.append("Duplicate segment IDs found")
+        is_valid = False
+    
+    # Check 2: All durations are positive
+    if (segments['duration_bars'] <= 0).any():
+        n_bad = int((segments['duration_bars'] <= 0).sum())
+        warnings.append(f"Found {n_bad} segments with non-positive duration")
+        is_valid = False
+    
+    # Check 3: Sum of durations equals valid state count
+    total_duration = int(segments['duration_bars'].sum())
+    if total_duration != valid_state_count:
+        warnings.append(
+            f"Duration sum mismatch: segments={total_duration}, valid_states={valid_state_count}"
+        )
+        is_valid = False
+    
+    # Check 4: Every segment start <= end
+    if (segments['start_index'] > segments['end_index']).any():
+        n_bad = int((segments['start_index'] > segments['end_index']).sum())
+        warnings.append(f"Found {n_bad} segments with start > end")
+        is_valid = False
+    
+    # Check 5: Segment count is reasonable
+    if len(segments) == 0 and valid_state_count > 0:
+        warnings.append("No segments found but valid states exist")
+        is_valid = False
+    
+    # Check 6: All states in segments are valid labels
+    if len(segments) > 0 and len(states.dropna()) > 0:
+        valid_labels = set(states.dropna().unique())
+        segment_labels = set(segments['state'].unique())
+        invalid = segment_labels - valid_labels
+        if invalid:
+            warnings.append(f"Invalid state labels in segments: {invalid}")
+            is_valid = False
+    
+    return is_valid, warnings
+
+
+def detect_segments(states: pd.Series) -> pd.DataFrame:
+    """
+    Detect contiguous same-state segments (run-length encoding).
+    
+    Algorithm:
+    - Walk through state series
+    - When state changes (or first valid state), close previous segment
+    - NaN values are skipped entirely
+    - Final segment is closed at end of series
+    
+    Args:
+        states: Series of state labels (may contain NaN)
+        
+    Returns:
+        DataFrame with columns: segment_id, state, state_code, start_index,
+        end_index, start_timestamp, end_timestamp, duration_bars
+    """
+    segments = []
+    current_state = None
+    segment_start = None
+    segment_id = 0
+    
+    for i in range(len(states)):
+        state_val = states.iloc[i]
+        
+        # Skip NaN
+        if pd.isna(state_val):
+            if current_state is not None:
+                # Close current segment
+                duration = i - segment_start
+                segments.append({
+                    'segment_id': segment_id,
+                    'state': current_state,
+                    'state_code': _state_to_code(current_state),
+                    'start_index': segment_start,
+                    'end_index': i - 1,
+                    'start_timestamp': _get_timestamp(states, segment_start),
+                    'end_timestamp': _get_timestamp(states, i - 1),
+                    'duration_bars': duration
+                })
+                segment_id += 1
+                current_state = None
+                segment_start = None
+            continue
+        
+        # Start of new segment
+        if current_state is None:
+            current_state = state_val
+            segment_start = i
+        # State changed
+        elif state_val != current_state:
+            duration = i - segment_start
+            segments.append({
+                'segment_id': segment_id,
+                'state': current_state,
+                'state_code': _state_to_code(current_state),
+                'start_index': segment_start,
+                'end_index': i - 1,
+                'start_timestamp': _get_timestamp(states, segment_start),
+                'end_timestamp': _get_timestamp(states, i - 1),
+                'duration_bars': duration
+            })
+            segment_id += 1
+            current_state = state_val
+            segment_start = i
+    
+    # Close final segment
+    if current_state is not None:
+        duration = len(states) - segment_start
+        segments.append({
+            'segment_id': segment_id,
+            'state': current_state,
+            'state_code': _state_to_code(current_state),
+            'start_index': segment_start,
+            'end_index': len(states) - 1,
+            'start_timestamp': _get_timestamp(states, segment_start),
+            'end_timestamp': _get_timestamp(states, len(states) - 1),
+            'duration_bars': duration
+        })
+    
+    if not segments:
+        return pd.DataFrame(columns=[
+            'segment_id', 'state', 'state_code', 'start_index',
+            'end_index', 'start_timestamp', 'end_timestamp', 'duration_bars'
+        ])
+    
+    return pd.DataFrame(segments)
+
+
+def _state_to_code(state: str) -> int:
+    """Convert state label to numeric code."""
+    mapping = {"Low": 0, "Normal": 1, "High": 2, "Extreme": 3}
+    return mapping.get(state, -1)
+
+
+def _get_timestamp(series: pd.Series, index: int) -> any:
+    """Get timestamp from series index if available."""
+    if hasattr(series, 'index') and index < len(series.index):
+        idx_val = series.index[index]
+        if hasattr(idx_val, 'strftime'):
+            return idx_val
+    return None
+
+
+# ============================================================
+# Unit Tests
+# ============================================================
+
+def test_known_sequence():
+    """
+    Test A: Known sequence produces correct segments.
+    
+    L, L, N, N, N, H, E, E → 4 segments
+    """
+    states = pd.Series(["Low", "Low", "Normal", "Normal", "Normal", 
+                        "High", "Extreme", "Extreme"])
+    segments = detect_segments(states)
+    
+    assert len(segments) == 4, f"Expected 4 segments, got {len(segments)}"
+    assert segments.iloc[0]['state'] == "Low"
+    assert segments.iloc[0]['duration_bars'] == 2
+    assert segments.iloc[1]['state'] == "Normal"
+    assert segments.iloc[1]['duration_bars'] == 3
+    assert segments.iloc[2]['state'] == "High"
+    assert segments.iloc[2]['duration_bars'] == 1
+    assert segments.iloc[3]['state'] == "Extreme"
+    assert segments.iloc[3]['duration_bars'] == 2
+    
+    # Duration sum equals valid states
+    assert segments['duration_bars'].sum() == len(states)
+    
+    return True
+
+
+def test_single_state():
+    """
+    Test B: Single state → 1 segment.
+    
+    Low, Low, Low, Low → 1 segment, duration=4
+    """
+    states = pd.Series(["Low", "Low", "Low", "Low"])
+    segments = detect_segments(states)
+    
+    assert len(segments) == 1, f"Expected 1 segment, got {len(segments)}"
+    assert segments.iloc[0]['state'] == "Low"
+    assert segments.iloc[0]['duration_bars'] == 4
+    assert segments.iloc[0]['start_index'] == 0
+    assert segments.iloc[0]['end_index'] == 3
+    
+    return True
+
+
+def test_alternating():
+    """
+    Test C: Alternating states → many segments.
+    
+    L, N, L, N, L → 5 segments, each duration=1
+    """
+    states = pd.Series(["Low", "Normal", "Low", "Normal", "Low"])
+    segments = detect_segments(states)
+    
+    assert len(segments) == 5, f"Expected 5 segments, got {len(segments)}"
+    assert (segments['duration_bars'] == 1).all(), "All durations should be 1"
+    assert segments['duration_bars'].sum() == 5
+    
+    return True
+
+
+def test_nan_handling():
+    """
+    Test D: NaN values are skipped, no NaN segments created.
+    
+    NaN, NaN, Low, Low → 1 segment starting at index 2
+    """
+    states = pd.Series([np.nan, np.nan, "Low", "Low"])
+    segments = detect_segments(states)
+    
+    assert len(segments) == 1, f"Expected 1 segment, got {len(segments)}"
+    assert segments.iloc[0]['state'] == "Low"
+    assert segments.iloc[0]['start_index'] == 2
+    assert segments.iloc[0]['duration_bars'] == 2
+    
+    # Duration sum equals valid states (2)
+    assert segments['duration_bars'].sum() == 2
+    
+    return True
+
+
+def test_nan_between_states():
+    """
+    Test E: NaN between states → two separate segments.
+    
+    Low, NaN, High → 2 segments
+    """
+    states = pd.Series(["Low", np.nan, "High"])
+    segments = detect_segments(states)
+    
+    assert len(segments) == 2, f"Expected 2 segments, got {len(segments)}"
+    assert segments.iloc[0]['state'] == "Low"
+    assert segments.iloc[0]['duration_bars'] == 1
+    assert segments.iloc[1]['state'] == "High"
+    assert segments.iloc[1]['duration_bars'] == 1
+    
+    return True
+
+
+def test_duration_consistency():
+    """
+    Test F: Sum of durations = number of valid states.
+    """
+    np.random.seed(42)
+    labels = ["Low", "Normal", "High", "Extreme"]
+    n = 1000
+    
+    # Create states with NaN
+    states_list = []
+    for _ in range(n):
+        if np.random.random() < 0.1:
+            states_list.append(np.nan)
+        else:
+            states_list.append(np.random.choice(labels))
+    
+    states = pd.Series(states_list)
+    segments = detect_segments(states)
+    
+    valid_states = int(states.notna().sum())
+    total_duration = int(segments['duration_bars'].sum())
+    
+    assert total_duration == valid_states, \
+        f"Duration sum {total_duration} != valid states {valid_states}"
+    
+    return True
+
+
+def test_boundary_consistency():
+    """
+    Test G: Every segment has start <= end.
+    """
+    np.random.seed(42)
+    labels = ["Low", "Normal", "High", "Extreme"]
+    n = 500
+    
+    states_list = [np.random.choice(labels) for _ in range(n)]
+    states = pd.Series(states_list)
+    segments = detect_segments(states)
+    
+    assert (segments['start_index'] <= segments['end_index']).all(), \
+        "Found segment with start > end"
+    
+    # End of one segment < start of next (no overlap)
+    for i in range(len(segments) - 1):
+        assert segments.iloc[i]['end_index'] < segments.iloc[i+1]['start_index'], \
+            f"Overlap between segment {i} and {i+1}"
+    
+    return True
+
+
+def test_reference_implementation():
+    """
+    Test H: Compare with independent plain-Python implementation.
+    """
+    np.random.seed(42)
+    labels = ["Low", "Normal", "High", "Extreme"]
+    n = 500
+    
+    states_list = []
+    for _ in range(n):
+        if np.random.random() < 0.05:
+            states_list.append(np.nan)
+        else:
+            states_list.append(np.random.choice(labels))
+    
+    states = pd.Series(states_list)
+    atlas_segments = detect_segments(states)
+    
+    # Independent reference implementation
+    ref_segments = []
+    current = None
+    start = None
+    seg_id = 0
+    
+    for i in range(len(states)):
+        s = states.iloc[i]
+        if pd.isna(s):
+            if current is not None:
+                ref_segments.append({
+                    'segment_id': seg_id,
+                    'state': current,
+                    'start_index': start,
+                    'end_index': i - 1,
+                    'duration_bars': i - start
+                })
+                seg_id += 1
+                current = None
+            continue
+        if current is None:
+            current = s
+            start = i
+        elif s != current:
+            ref_segments.append({
+                'segment_id': seg_id,
+                'state': current,
+                'start_index': start,
+                'end_index': i - 1,
+                'duration_bars': i - start
+            })
+            seg_id += 1
+            current = s
+            start = i
+    
+    if current is not None:
+        ref_segments.append({
+            'segment_id': seg_id,
+            'state': current,
+            'start_index': start,
+            'end_index': len(states) - 1,
+            'duration_bars': len(states) - start
+        })
+    
+    # Compare counts
+    assert len(atlas_segments) == len(ref_segments), \
+        f"Count mismatch: atlas={len(atlas_segments)}, ref={len(ref_segments)}"
+    
+    # Compare each segment
+    for i in range(len(atlas_segments)):
+        a = atlas_segments.iloc[i]
+        r = ref_segments[i]
+        assert a['state'] == r['state'], f"Segment {i}: state mismatch"
+        assert a['start_index'] == r['start_index'], f"Segment {i}: start mismatch"
+        assert a['end_index'] == r['end_index'], f"Segment {i}: end mismatch"
+        assert a['duration_bars'] == r['duration_bars'], f"Segment {i}: duration mismatch"
+    
+    return True
+
+
+def test_ids_unique():
+    """Test I: All segment IDs are unique."""
+    np.random.seed(42)
+    labels = ["Low", "Normal", "High", "Extreme"]
+    states = pd.Series([np.random.choice(labels) for _ in range(200)])
+    segments = detect_segments(states)
+    
+    assert not segments['segment_id'].duplicated().any(), "Duplicate segment IDs"
+    
+    return True
+
+
+def run_all_validation_tests():
+    """Run all segment detection validation tests"""
+    print("\n" + "=" * 60)
+    print("ATLAS SEGMENT DETECTION VALIDATOR - UNIT TESTS")
+    print("=" * 60)
+    print("  Method: Run-length encoding of state sequences")
+    print("  NaN handling: Skipped, no segments created")
+    
+    tests = [
+        ("Known Sequence (4 segments)", test_known_sequence),
+        ("Single State (1 segment)", test_single_state),
+        ("Alternating (5 segments)", test_alternating),
+        ("NaN Handling", test_nan_handling),
+        ("NaN Between States", test_nan_between_states),
+        ("Duration Consistency", test_duration_consistency),
+        ("Boundary Consistency", test_boundary_consistency),
+        ("Reference Implementation", test_reference_implementation),
+        ("Unique IDs", test_ids_unique),
+    ]
+    
+    results = {}
+    for name, test_func in tests:
+        try:
+            test_func()
+            results[name] = True
+            print(f"  ✓ {name}")
+        except AssertionError as e:
+            results[name] = False
+            print(f"  ✗ {name}: {e}")
+        except Exception as e:
+            results[name] = False
+            print(f"  ✗ {name}: {type(e).__name__}: {e}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    print("=" * 60)
+    
+    return passed == total
+
+
+if __name__ == "__main__":
+    success = run_all_validation_tests()
+    import sys
+    sys.exit(0 if success else 1)

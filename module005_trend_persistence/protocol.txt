@@ -1,0 +1,45 @@
+# atlas/modules/module005_trend_persistence/protocol.py
+"""
+Module 005 Research Protocol
+Trend Persistence Analysis - Phase 1
+"""
+
+PROTOCOL = {
+    "module_id": "005",
+    "module_name": "Trend Persistence",
+    "research_question": "How long do BTC trends statistically persist?",
+    "null_hypothesis": "Trend direction is independent from candle to candle.",
+    "alternative_hypothesis": "Trends exhibit persistence beyond random chance.",
+    "rationale": (
+        "Understanding trend persistence is essential for momentum strategies, "
+        "position holding periods, and market regime characterization. "
+        "If trends persist longer than random chance, this indicates "
+        "market inefficiency that can be exploited."
+    ),
+    "methodology": (
+        "Phase 1: Trend Segmentation\n"
+        "1. Calculate log returns from close prices\n"
+        "2. Determine trend direction (up/down/flat) for each candle\n"
+        "3. Segment consecutive same-direction candles into trends\n"
+        "4. Compute trend duration statistics\n"
+        "5. Compare to expected durations under independence"
+    ),
+    "statistics": [
+        "Number of up trends",
+        "Number of down trends",
+        "Total trend segments",
+        "Mean trend length",
+        "Median trend length",
+        "Maximum trend length",
+        "Trend length distribution"
+    ],
+    "outputs": [
+        "trend_segments",
+        "trend_summary",
+        "statistics"
+    ],
+    "expected_under_independence": {
+        "note": "Under H0 (independent directions), expected trend length = 1/(1-p) where p is probability of continuing same direction",
+        "calculation": "If up/down equally likely, expected length ≈ 2.0 candles"
+    }
+}

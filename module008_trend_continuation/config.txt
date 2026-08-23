@@ -1,0 +1,52 @@
+# atlas/modules/module008_trend_continuation/config.py
+"""
+Project Atlas
+Module 008 - Trend Continuation Probability
+Configuration
+
+UPDATED: Volatility-aware thresholds using ATR-based scaling.
+"""
+
+MODULE_ID = "008"
+MODULE_NAME = "Trend Continuation Probability"
+MODULE_VERSION = "1.1.0"
+
+# Future look-ahead after pullback ends (bars)
+LOOKAHEAD_BARS = 100
+
+# Threshold method: "fixed" or "adaptive"
+THRESHOLD_METHOD = "adaptive"
+
+# Fixed thresholds (% from pullback end) - used when method="fixed"
+FIXED_CONTINUATION_THRESHOLD = 0.50
+FIXED_REVERSAL_THRESHOLD = 0.50
+
+# Adaptive thresholds - used when method="adaptive"
+# Threshold = ATR_MULTIPLIER * ATR(period)
+# ATR period for volatility estimation
+ATR_PERIOD = 20
+
+# Multiplier: threshold = multiplier * ATR
+# 1.0 = one ATR move required to confirm direction
+ATR_MULTIPLIER = 1.0
+
+# Export control
+EXPORT_EVENTS = True
+
+# Depth bins for stratified analysis (%)
+DEPTH_BINS = [
+    (0, 1),
+    (1, 2),
+    (2, 4),
+    (4, 8),
+    (8, 100)
+]
+
+# Duration bins for stratified analysis (bars)
+DURATION_BINS = [
+    (1, 5),
+    (5, 10),
+    (10, 20),
+    (20, 50),
+    (50, 200)
+]

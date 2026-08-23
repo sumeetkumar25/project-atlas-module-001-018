@@ -1,0 +1,6 @@
+# atlas/modules/module015_compression/__init__.py
+"""
+Module 015: Compression Analysis
+Analyzes what happens after BTC enters compression (low range) states.
+Reuses atlas.core.volatility and atlas.core.compression.
+"""

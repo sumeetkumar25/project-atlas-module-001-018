@@ -1,0 +1,438 @@
+# atlas/modules/module004_stationarity/module.py
+"""
+Module 004: Stationarity Analysis - Phase 1
+
+Tests whether BTC returns are statistically stationary using:
+- Augmented Dickey-Fuller (ADF) test
+- KPSS test
+- Rolling mean and variance analysis
+
+UPDATED: Added confidence level assessment for richer output.
+"""
+
+from typing import Dict, Any, Optional
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from statsmodels.tsa.stattools import adfuller, kpss
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.core.returns_utils import log_returns
+from atlas.framework.protocol import ResearchProtocol, ModuleStatus, ModuleCategory
+from atlas.framework.registry import AtlasRegistry
+
+from .config import (
+    ROLLING_WINDOWS,
+    ADF_SIGNIFICANCE,
+    KPSS_SIGNIFICANCE,
+    KPSS_REGRESSION,
+    MODULE_ID,
+    MODULE_NAME,
+    MODULE_VERSION
+)
+from .protocol import RESEARCH_PROTOCOL
+
+MODULE_INFO = {
+    "id": MODULE_ID,
+    "name": MODULE_NAME,
+    "version": MODULE_VERSION,
+    "author": "Project Atlas",
+    "phase": "Phase 1 - Stationarity Tests",
+    "requires": ["000", "001"],
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": [
+        "adf_test_results",
+        "kpss_test_results",
+        "rolling_mean",
+        "rolling_variance",
+        "stationarity_conclusion",
+        "confidence_level"
+    ],
+    "return_calculation": "atlas.core.returns_utils.log_returns()",
+    "note": "Module tests stationarity of LOG RETURNS, not prices"
+}
+
+
+class StationarityResearch(BaseResearchModule):
+    """
+    Module 004: Stationarity Analysis - Phase 1
+    
+    Research Question: Are BTC returns statistically stationary?
+    
+    IMPORTANT: This module evaluates the stationarity of LOG RETURNS,
+    not prices. Prices → log returns → ADF + KPSS tests.
+    
+    Confidence levels:
+    - High: Both ADF and KPSS agree with strong p-values
+    - Medium: One test borderline or tests give mixed signals
+    - Low: Both borderline, inconclusive, or insufficient evidence
+    """
+    
+    PROTOCOL = ResearchProtocol(
+        module_id=MODULE_ID,
+        module_name=MODULE_NAME,
+        category=ModuleCategory.VALIDATION,
+        question=RESEARCH_PROTOCOL["research_question"],
+        hypothesis=RESEARCH_PROTOCOL["null_hypothesis"],
+        rationale=RESEARCH_PROTOCOL["rationale"],
+        methodology=RESEARCH_PROTOCOL["methodology"],
+        statistics=RESEARCH_PROTOCOL["statistics"] + ["confidence_level"],
+        depends_on=["000", "001"],
+        required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+        author="Project Atlas",
+        version=MODULE_VERSION,
+        status=ModuleStatus.PLANNED,
+        produces=[
+            "adf_results",
+            "kpss_results",
+            "rolling_mean",
+            "rolling_variance",
+            "confidence_assessment"
+        ]
+    )
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(
+            module_name="Stationarity",
+            module_version=MODULE_VERSION
+        )
+        self.registry = registry or AtlasRegistry()
+        
+        existing = self.registry.get_module(MODULE_ID)
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        
+        self.returns: Optional[pd.Series] = None
+    
+    def _register_pipeline_steps(self):
+        """Register Phase 1 computation steps"""
+        self.pipeline_steps = [
+            ("returns", self._calculate_returns),
+            ("adf", self._run_adf),
+            ("kpss", self._run_kpss),
+            ("rolling_mean", self._rolling_mean),
+            ("rolling_variance", self._rolling_variance),
+        ]
+    
+    # ============================================================
+    # Step 1: Calculate Returns
+    # ============================================================
+    
+    def _calculate_returns(self) -> Dict[str, Any]:
+        """Calculate log returns using shared utility with built-in hygiene"""
+        self.logger.info("Calculating log returns from close prices")
+        self.logger.info("  Using atlas.core.returns_utils.log_returns()")
+        
+        close = self.df["close"].astype(float)
+        
+        if (close <= 0).any():
+            n_bad = int((close <= 0).sum())
+            raise ValueError(
+                f"Close prices contain {n_bad} non-positive value(s). "
+                f"Log returns require strictly positive prices."
+            )
+        
+        self.returns = log_returns(self.df["close"])
+        
+        self.logger.metric("Return observations", f"{len(self.returns):,}")
+        self.logger.metric("Mean return", f"{self.returns.mean():.8f}")
+        self.logger.metric("Std return", f"{self.returns.std():.8f}")
+        self.logger.metric("Minimum return", f"{self.returns.min():.8f}")
+        self.logger.metric("Maximum return", f"{self.returns.max():.8f}")
+        
+        return_range = self.returns.max() - self.returns.min()
+        self.logger.metric("Return range", f"{return_range:.8f}")
+        
+        return {
+            "return_observations": len(self.returns),
+            "return_mean": float(self.returns.mean()),
+            "return_std": float(self.returns.std()),
+            "return_min": float(self.returns.min()),
+            "return_max": float(self.returns.max()),
+            "return_range": float(return_range)
+        }
+    
+    # ============================================================
+    # Step 2: Augmented Dickey-Fuller Test
+    # ============================================================
+    
+    def _run_adf(self) -> Dict[str, Any]:
+        """Augmented Dickey-Fuller test for unit root"""
+        self.logger.info("Running Augmented Dickey-Fuller (ADF) test")
+        self.logger.info("  H0: Unit root present (non-stationary)")
+        self.logger.info("  H1: Stationary")
+        
+        if len(self.returns) < 10:
+            raise ValueError(f"Need at least 10 observations, got {len(self.returns)}")
+        
+        result = adfuller(self.returns, autolag="AIC")
+        
+        adf_stat = result[0]
+        adf_pvalue = result[1]
+        used_lags = result[2]
+        nobs = result[3]
+        critical_values = result[4]
+        
+        self.result.statistics["adf_statistic"] = float(adf_stat)
+        self.result.statistics["adf_pvalue"] = float(adf_pvalue)
+        self.result.statistics["adf_used_lags"] = int(used_lags)
+        self.result.statistics["adf_observations"] = int(nobs)
+        self.result.statistics["adf_cv_1pct"] = float(critical_values["1%"])
+        self.result.statistics["adf_cv_5pct"] = float(critical_values["5%"])
+        self.result.statistics["adf_cv_10pct"] = float(critical_values["10%"])
+        
+        self.logger.metric("ADF Statistic", f"{adf_stat:.6f}")
+        self.logger.metric("ADF p-value", f"{adf_pvalue:.6f}")
+        self.logger.metric("Used lags", f"{used_lags}")
+        self.logger.metric("Critical 1%", f"{critical_values['1%']:.6f}")
+        self.logger.metric("Critical 5%", f"{critical_values['5%']:.6f}")
+        self.logger.metric("Critical 10%", f"{critical_values['10%']:.6f}")
+        
+        if adf_stat < critical_values["1%"]:
+            self.logger.info("  ADF statistic < 1% critical value → strong evidence")
+        
+        is_stationary = adf_pvalue < ADF_SIGNIFICANCE
+        self.result.statistics["adf_stationary"] = is_stationary
+        
+        if is_stationary:
+            self.logger.info(f"  ✓ ADF: p={adf_pvalue:.6f} < {ADF_SIGNIFICANCE} → Reject H0")
+        else:
+            self.logger.info(f"  ✗ ADF: p={adf_pvalue:.6f} ≥ {ADF_SIGNIFICANCE} → Cannot reject H0")
+        
+        return {
+            "adf_statistic": float(adf_stat),
+            "adf_pvalue": float(adf_pvalue),
+            "adf_stationary": is_stationary
+        }
+    
+    # ============================================================
+    # Step 3: KPSS Test
+    # ============================================================
+    
+    def _run_kpss(self) -> Dict[str, Any]:
+        """KPSS test for stationarity"""
+        self.logger.info("Running KPSS test")
+        self.logger.info("  H0: Stationary")
+        self.logger.info("  H1: Unit root present (non-stationary)")
+        
+        result = kpss(self.returns, regression=KPSS_REGRESSION, nlags="auto")
+        
+        kpss_stat = result[0]
+        kpss_pvalue = result[1]
+        kpss_lags = result[2]
+        
+        self.result.statistics["kpss_statistic"] = float(kpss_stat)
+        self.result.statistics["kpss_pvalue"] = float(kpss_pvalue)
+        self.result.statistics["kpss_lags"] = int(kpss_lags)
+        
+        self.logger.metric("KPSS Statistic", f"{kpss_stat:.6f}")
+        self.logger.metric("KPSS p-value", f"{kpss_pvalue:.6f}")
+        self.logger.metric("Used lags", f"{kpss_lags}")
+        
+        is_stationary = kpss_pvalue > KPSS_SIGNIFICANCE
+        self.result.statistics["kpss_stationary"] = is_stationary
+        
+        if is_stationary:
+            self.logger.info(f"  ✓ KPSS: p={kpss_pvalue:.6f} > {KPSS_SIGNIFICANCE} → Cannot reject H0")
+        else:
+            self.logger.info(f"  ✗ KPSS: p={kpss_pvalue:.6f} ≤ {KPSS_SIGNIFICANCE} → Reject H0")
+        
+        return {
+            "kpss_statistic": float(kpss_stat),
+            "kpss_pvalue": float(kpss_pvalue),
+            "kpss_stationary": is_stationary
+        }
+    
+    # ============================================================
+    # Step 4: Rolling Mean
+    # ============================================================
+    
+    def _rolling_mean(self) -> Dict[str, Any]:
+        """Calculate rolling mean of returns"""
+        self.logger.info(f"Calculating rolling mean for windows: {ROLLING_WINDOWS}")
+        
+        rolling = pd.DataFrame()
+        rolling["timestamp"] = self.df.loc[self.returns.index, "timestamp"]
+        
+        for window in ROLLING_WINDOWS:
+            col = f"mean_{window}"
+            rolling[col] = self.returns.rolling(window=window).mean()
+        
+        self.result.artifacts["rolling_mean"] = rolling
+        
+        full_mean = self.returns.mean()
+        for window in ROLLING_WINDOWS:
+            col = f"mean_{window}"
+            valid = rolling[col].dropna()
+            if len(valid) > 0:
+                deviation = (valid - full_mean).abs().max()
+                self.logger.metric(
+                    f"Mean (w={window})",
+                    f"range=[{valid.min():.6f}, {valid.max():.6f}], max_dev={deviation:.6f}"
+                )
+        
+        return {}
+    
+    # ============================================================
+    # Step 5: Rolling Variance
+    # ============================================================
+    
+    def _rolling_variance(self) -> Dict[str, Any]:
+        """Calculate rolling variance of returns"""
+        self.logger.info(f"Calculating rolling variance for windows: {ROLLING_WINDOWS}")
+        self.logger.info("  Note: Variance changes do NOT indicate non-stationarity")
+        
+        rolling = pd.DataFrame()
+        rolling["timestamp"] = self.df.loc[self.returns.index, "timestamp"]
+        
+        for window in ROLLING_WINDOWS:
+            col = f"var_{window}"
+            rolling[col] = self.returns.rolling(window=window).var()
+        
+        self.result.artifacts["rolling_variance"] = rolling
+        
+        for window in ROLLING_WINDOWS:
+            col = f"var_{window}"
+            valid = rolling[col].dropna()
+            if len(valid) > 0:
+                self.logger.metric(
+                    f"Var (w={window})",
+                    f"range=[{valid.min():.8f}, {valid.max():.8f}]"
+                )
+        
+        return {}
+    
+    # ============================================================
+    # Stationarity Assessment
+    # ============================================================
+    
+    def _assess_stationarity(self) -> str:
+        """
+        Combined assessment using both ADF and KPSS tests.
+        
+        Returns:
+            "stationary", "non_stationary", or "inconclusive"
+        """
+        adf_stat = self.result.statistics.get("adf_stationary", False)
+        kpss_stat = self.result.statistics.get("kpss_stationary", False)
+        
+        if adf_stat and kpss_stat:
+            return "stationary"
+        elif not adf_stat and not kpss_stat:
+            return "non_stationary"
+        else:
+            return "inconclusive"
+    
+    def _assess_confidence(self) -> str:
+        """
+        Assess confidence level of the stationarity conclusion.
+        
+        Factors considered:
+        - Agreement between ADF and KPSS
+        - Strength of p-values (how far from significance boundary)
+        - Sample size adequacy
+        
+        Returns:
+            "High", "Medium", or "Low"
+        """
+        adf_p = self.result.statistics.get("adf_pvalue", 1.0)
+        kpss_p = self.result.statistics.get("kpss_pvalue", 0.0)
+        conclusion = self.result.statistics.get("stationarity_conclusion", "inconclusive")
+        
+        # Check p-value strength
+        # For ADF: lower p-value = stronger evidence against unit root
+        # For KPSS: higher p-value = stronger evidence for stationarity
+        adf_strong = adf_p < 0.01  # Very strong rejection of unit root
+        kpss_strong = kpss_p > 0.10  # Strong failure to reject stationarity
+        
+        adf_borderline = 0.01 <= adf_p < 0.05
+        kpss_borderline = 0.05 < kpss_p <= 0.10
+        
+        # Count signals
+        strong_signals = sum([adf_strong, kpss_strong])
+        borderline_signals = sum([adf_borderline, kpss_borderline])
+        
+        if conclusion == "inconclusive":
+            return "Low"
+        
+        if conclusion == "stationary":
+            if strong_signals == 2:
+                return "High"
+            elif strong_signals == 1 or borderline_signals >= 1:
+                return "Medium"
+            else:
+                return "Low"
+        
+        if conclusion == "non_stationary":
+            if adf_p > 0.10 and kpss_p < 0.01:
+                return "High"
+            elif adf_p > 0.05 and kpss_p < 0.05:
+                return "Medium"
+            else:
+                return "Low"
+        
+        return "Low"
+    
+    # ============================================================
+    # Compute
+    # ============================================================
+    
+    def compute(self) -> Dict[str, Any]:
+        """Execute all pipeline steps"""
+        all_results = {}
+        
+        for name, step in self.pipeline_steps:
+            self.logger.info(f"Step: {name}")
+            step_result = step()
+            all_results.update(step_result)
+        
+        # Combined assessment
+        conclusion = self._assess_stationarity()
+        confidence = self._assess_confidence()
+        
+        self.result.statistics["stationarity_conclusion"] = conclusion
+        self.result.statistics["confidence_level"] = confidence
+        
+        # Display conclusion
+        self.logger.section("Stationarity Conclusion")
+        
+        adf_p = self.result.statistics.get("adf_pvalue", 1.0)
+        kpss_p = self.result.statistics.get("kpss_pvalue", 0.0)
+        adf_stat_val = self.result.statistics.get("adf_statistic", 0.0)
+        
+        self.logger.info(f"ADF: stat={adf_stat_val:.4f}, p={adf_p:.6f}")
+        self.logger.info(f"KPSS: p={kpss_p:.6f}")
+        self.logger.info(f"Conclusion: {conclusion}")
+        self.logger.info(f"Confidence: {confidence}")
+        
+        # Confidence explanation
+        confidence_reasons = {
+            "High": "Both tests agree with strong statistical evidence",
+            "Medium": "Tests agree but with borderline p-values, or partial agreement",
+            "Low": "Tests conflict, borderline results, or insufficient evidence"
+        }
+        self.logger.info(f"  ({confidence_reasons.get(confidence, '')})")
+        
+        if conclusion == "stationary":
+            self.logger.success(f"✓ BTC log returns are STATIONARY ({confidence} confidence)")
+        elif conclusion == "non_stationary":
+            self.logger.error(f"✗ BTC log returns are NON-STATIONARY ({confidence} confidence)")
+        else:
+            self.logger.warning(f"⚠ Results INCONCLUSIVE ({confidence} confidence)")
+        
+        all_results["stationarity_conclusion"] = conclusion
+        all_results["confidence_level"] = confidence
+        self.result.status = "completed"
+        
+        return all_results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        """Execute research from file"""
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df: pd.DataFrame, 
+                      dataset_id: str = "in_memory",
+                      output_dir: Optional[str] = None):
+        """Execute research from DataFrame (for testing)"""
+        return super().run_dataframe(df, dataset_id, output_dir)

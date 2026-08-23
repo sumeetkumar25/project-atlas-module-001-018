@@ -1,0 +1,76 @@
+# atlas/modules/module013_range_expansion/protocol.py
+"""
+Module 013 Research Protocol
+Range Expansion & Compression
+"""
+
+from atlas.framework.protocol import ResearchProtocol, ModuleCategory
+from .config import MODULE_VERSION
+
+PROTOCOL = ResearchProtocol(
+    module_id="013",
+    module_name="Range Expansion & Compression",
+    category=ModuleCategory.VOLATILITY,
+    
+    question=(
+        "How does BTC alternate between periods of "
+        "range compression and range expansion?"
+    ),
+    
+    hypothesis=(
+        "Periods of low realized range tend to cluster "
+        "and are followed by statistically larger "
+        "range expansion."
+    ),
+    
+    rationale=(
+        "Range expansion and compression cycles are fundamental "
+        "to market behavior. Compression periods (low volatility, "
+        "narrow ranges) often precede expansion periods (high volatility, "
+        "wide ranges). Understanding these cycles helps characterize "
+        "market regime transitions."
+    ),
+    
+    methodology=(
+        "Phase 1.0: Skeleton architecture (current)\n"
+        "Phase 1.1: True Range and ATR calculation\n"
+        "Phase 1.2: Range ratio and percentile classification\n"
+        "Phase 1.3: State assignment and segment detection\n"
+        "Phase 1.4: Expansion/compression statistics"
+    ),
+    
+    statistics=[
+        "ATR values",
+        "Range ratio (TR / ATR)",
+        "Percentile ranks",
+        "Compression/expansion state counts",
+        "Segment durations",
+        "Transition frequencies",
+    ],
+    
+    depends_on=["000"],
+    required_datasets=["BTC_15m", "BTC_1h", "BTC_4h"],
+    
+    author="Project Atlas",
+    version=MODULE_VERSION,
+    
+    produces=[
+        "true_range_series",
+        "atr_series",
+        "range_ratio",
+        "expansion_states",
+        "compression_segments",
+    ],
+    
+    limitations=[
+        "ATR window is fixed at 14",
+        "Percentile window is fixed at 252",
+        "Thresholds are percentile-based (relative, not absolute)",
+    ],
+    
+    future_research=[
+        "Adaptive ATR windows",
+        "Multi-timeframe compression alignment",
+        "Compression-conditional breakout analysis",
+    ]
+)

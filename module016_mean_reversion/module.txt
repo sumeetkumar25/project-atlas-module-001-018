@@ -1,0 +1,326 @@
+# atlas/modules/module016_mean_reversion/module.py
+"""
+Module 016: Mean Reversion Analysis - Phase 1.6 (FINAL)
+
+All 7 pipeline steps implemented.
+
+Pipeline:
+  deviation → extremes → reversion → duration → magnitude → summary → export
+"""
+
+from typing import Dict, Any, Optional, List
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.core.mean_reversion import (
+    MeanReversionMetrics,
+    MeanReversionStatistics,
+    ExtremeDetector,
+    ReversionDetector,
+    DurationStatistics,
+    MagnitudeStatistics,
+)
+from atlas.framework.registry import AtlasRegistry
+
+from .config import (
+    MODULE_ID, MODULE_NAME, MODULE_VERSION,
+    LOOKBACK_WINDOW, STD_WINDOW, Z_SCORE_THRESHOLD,
+    MAX_REVERSION_BARS, MIN_DEVIATION,
+)
+from .protocol import PROTOCOL
+
+MODULE_INFO = {
+    "id": MODULE_ID, "name": MODULE_NAME, "version": MODULE_VERSION,
+    "author": "Project Atlas",
+    "phase": "Phase 1.6 (FINAL)",
+    "requires": ["010", "013", "015"],
+    "datasets_required": ["BTC_15m", "BTC_1h", "BTC_4h"],
+    "produces": ["deviation_series", "extreme_events", "reversion_events",
+                 "duration_statistics", "reversion_magnitude_statistics",
+                 "reversion_magnitude_events", "reversion_magnitude_distribution",
+                 "research_summary"],
+    "status": "Research Complete",
+    "core_utils": "atlas.core.mean_reversion",
+}
+
+
+class MeanReversionResearch(BaseResearchModule):
+    """Module 016: Mean Reversion Analysis - Phase 1.6 (FINAL)"""
+    
+    PROTOCOL = PROTOCOL
+    MODULE_INFO = MODULE_INFO
+    
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+        super().__init__(module_name=MODULE_NAME, module_version=MODULE_VERSION)
+        self.registry = registry or AtlasRegistry()
+        existing = self.registry.get_module(MODULE_ID)
+        if not existing:
+            self.registry.register_module(self.PROTOCOL)
+        self.equilibrium: Optional[pd.Series] = None
+        self.deviation: Optional[pd.Series] = None
+        self.is_extreme: Optional[pd.Series] = None
+        self.reversion_events: Optional[pd.DataFrame] = None
+        self.dataset_name: str = "unknown"
+    
+    def _register_pipeline_steps(self):
+        self.pipeline_steps = [
+            ("deviation", self._compute_deviation),
+            ("extremes", self._detect_extremes),
+            ("reversion", self._detect_reversion),
+            ("duration", self._compute_duration),
+            ("magnitude", self._compute_magnitude),
+            ("summary", self._compute_summary),
+            ("export", self._export_results),
+        ]
+    
+    @property
+    def pipeline_names(self) -> List[str]:
+        return [name for name, _ in self.pipeline_steps]
+    
+    def get_config_snapshot(self) -> Dict[str, Any]:
+        return {
+            "module_name": self.module_name, "module_version": self.module_version,
+            "lookback_window": LOOKBACK_WINDOW, "std_window": STD_WINDOW,
+            "z_score_threshold": Z_SCORE_THRESHOLD,
+            "max_reversion_bars": MAX_REVERSION_BARS, "min_deviation": MIN_DEVIATION,
+        }
+    
+    def get_protocol_snapshot(self) -> Dict[str, Any]:
+        return {
+            "question": PROTOCOL.question, "hypothesis": PROTOCOL.hypothesis,
+            "methodology": PROTOCOL.methodology, "depends_on": PROTOCOL.depends_on,
+        }
+    
+    # ---- Step 1: Deviation ----
+    def _compute_deviation(self) -> Dict[str, Any]:
+        self.logger.info("Step 1: Calculating deviation")
+        self.logger.info(f"  Method: close - rolling_mean(window={LOOKBACK_WINDOW})")
+        
+        self.equilibrium = MeanReversionMetrics.rolling_mean(
+            self.df["close"], LOOKBACK_WINDOW
+        )
+        self.deviation = MeanReversionMetrics.deviation(
+            self.df["close"], self.equilibrium
+        )
+        self.df["equilibrium"] = self.equilibrium
+        self.df["deviation"] = self.deviation
+        
+        observations = len(self.deviation)
+        warmup = int(self.deviation.isna().sum())
+        valid = int(self.deviation.notna().sum())
+        mean_dev = float(self.deviation.dropna().mean())
+        max_dev = float(self.deviation.abs().max())
+        
+        self.logger.metric("Deviation observations", f"{observations:,}")
+        self.logger.metric("Warm-up NaN", f"{warmup}")
+        self.logger.metric("Valid deviations", f"{valid:,}")
+        self.logger.metric("Mean deviation", f"{mean_dev:.4f}")
+        self.logger.metric("Max absolute deviation", f"{max_dev:.4f}")
+        
+        self.logger.success("Deviation calculation complete")
+        
+        return {
+            "deviation_status": "complete",
+            "lookback_window": LOOKBACK_WINDOW,
+            "deviation_observations": observations,
+            "deviation_warmup_nan": warmup,
+            "valid_deviation": valid,
+            "mean_deviation": mean_dev,
+            "max_deviation": max_dev,
+        }
+    
+    # ---- Step 2: Extreme Detection ----
+    def _detect_extremes(self) -> Dict[str, Any]:
+        self.logger.info("Step 2: Detecting extreme deviations")
+        self.logger.info(f"  Z-score threshold: ±{Z_SCORE_THRESHOLD}")
+        
+        rolling_std = MeanReversionStatistics.rolling_std(
+            self.df["close"], STD_WINDOW
+        )
+        self.df["rolling_std"] = rolling_std
+        
+        z_score = MeanReversionStatistics.z_score(
+            self.deviation, rolling_std
+        )
+        self.df["z_score"] = z_score
+        
+        is_extreme = ExtremeDetector.detect(z_score, Z_SCORE_THRESHOLD)
+        self.df["is_extreme"] = is_extreme
+        self.is_extreme = is_extreme
+        
+        event_count = int(is_extreme.sum())
+        event_pct = event_count / len(is_extreme) * 100 if len(is_extreme) > 0 else 0
+        
+        self.logger.metric("Extreme events", f"{event_count:,}")
+        self.logger.metric("Extreme %", f"{event_pct:.2f}%")
+        
+        self.result.artifacts["extreme_events"] = self.df[
+            ["timestamp", "close", "equilibrium", "deviation",
+             "rolling_std", "z_score", "is_extreme"]
+        ].copy()
+        
+        self.logger.success("Extreme detection complete")
+        
+        return {
+            "extremes_status": "complete",
+            "zscore_window": STD_WINDOW,
+            "zscore_threshold": Z_SCORE_THRESHOLD,
+            "extreme_events": event_count,
+            "extreme_percentage": round(event_pct, 2),
+        }
+    
+    # ---- Step 3: Reversion Detection ----
+    def _detect_reversion(self) -> Dict[str, Any]:
+        self.logger.info("Step 3: Detecting reversion events")
+        self.logger.info(f"  Max search window: {MAX_REVERSION_BARS} bars")
+        
+        self.reversion_events = ReversionDetector.detect(
+            timestamp=self.df["timestamp"],
+            equilibrium=self.equilibrium,
+            close=self.df["close"],
+            is_extreme=self.is_extreme,
+            max_bars=MAX_REVERSION_BARS,
+        )
+        
+        total = len(self.reversion_events)
+        reverted = int(self.reversion_events["reverted"].sum())
+        probability = reverted / total * 100 if total > 0 else 0
+        
+        self.logger.metric("Extreme events", f"{total:,}")
+        self.logger.metric("Reverted", f"{reverted:,}")
+        self.logger.metric("Reversion %", f"{probability:.2f}%")
+        
+        self.result.artifacts["reversion_events"] = self.reversion_events.copy()
+        
+        self.logger.success("Reversion detection complete")
+        
+        return {
+            "reversion_status": "complete",
+            "total_extremes": total,
+            "reverted_events": reverted,
+            "reversion_probability": round(probability, 2),
+        }
+    
+    # ---- Step 4: Duration ----
+    def _compute_duration(self) -> Dict[str, Any]:
+        self.logger.info("Step 4: Computing reversion duration")
+        
+        stats = DurationStatistics.compute(self.reversion_events)
+        
+        if stats["reverted_events"] > 0:
+            self.logger.metric("Reverted events", f"{stats['reverted_events']:,}")
+            self.logger.metric("Mean duration", f"{stats['mean_duration']:.2f} bars")
+            self.logger.metric("Median duration", f"{stats['median_duration']:.2f} bars")
+            self.logger.metric("Maximum duration", f"{stats['max_duration']} bars")
+        
+        duration_table = (
+            self.reversion_events[self.reversion_events["reverted"]]
+            [["timestamp", "bars_to_reversion"]].copy()
+        )
+        
+        self.result.artifacts["duration_statistics"] = pd.DataFrame([stats])
+        self.result.artifacts["duration_events"] = duration_table
+        
+        self.logger.success("Duration analysis complete")
+        
+        return {"duration_status": "complete", **stats}
+    
+    # ---- Step 5: Magnitude ----
+    def _compute_magnitude(self) -> Dict[str, Any]:
+        self.logger.info("Step 5: Computing reversion magnitude")
+        
+        stats = MagnitudeStatistics.compute(self.reversion_events)
+        table = MagnitudeStatistics.event_table(self.reversion_events)
+        distribution = MagnitudeStatistics.distribution(self.reversion_events)
+        
+        self.result.artifacts["reversion_magnitude_statistics"] = pd.DataFrame([stats])
+        self.result.artifacts["reversion_magnitude_events"] = table
+        self.result.artifacts["reversion_magnitude_distribution"] = distribution
+        
+        if stats["reverted_events"] > 0:
+            self.logger.metric("Mean recovery", f"{stats['mean_recovery_ratio']:.2%}")
+            self.logger.metric("Median recovery", f"{stats['median_recovery_ratio']:.2%}")
+            self.logger.metric("Std recovery", f"{stats['std_recovery_ratio']:.4f}")
+            self.logger.metric("Min recovery", f"{stats['min_recovery_ratio']:.2%}")
+            self.logger.metric("Max recovery", f"{stats['max_recovery_ratio']:.2%}")
+            self.logger.metric("P95 recovery", f"{stats['p95']:.2%}")
+        
+        self.logger.success("Magnitude analysis complete")
+        
+        return {"magnitude_status": "complete", **stats}
+    
+    # ---- Step 6: Summary ----
+    def _compute_summary(self) -> Dict[str, Any]:
+        """Build research summary."""
+        self.logger.info("Step 6: Building research summary")
+        
+        stats = self.result.statistics
+        
+        summary = {
+            "module": self.module_name,
+            "version": self.module_version,
+            "dataset": self.dataset_name,
+            "bars": len(self.df),
+            "lookback_window": LOOKBACK_WINDOW,
+            "zscore_threshold": Z_SCORE_THRESHOLD,
+            "max_reversion_bars": MAX_REVERSION_BARS,
+            "extreme_events": stats.get("extreme_events", 0),
+            "reverted_events": stats.get("reverted_events", 0),
+            "reversion_probability": stats.get("reversion_probability", 0),
+            "mean_duration": stats.get("mean_duration", 0),
+            "median_duration": stats.get("median_duration", 0),
+            "mean_recovery": stats.get("mean_recovery_ratio", 0),
+            "median_recovery": stats.get("median_recovery_ratio", 0),
+        }
+        
+        self.result.artifacts["research_summary"] = pd.DataFrame([summary])
+        
+        self.logger.metric("Extreme events", f"{summary['extreme_events']:,}")
+        self.logger.metric("Reverted events", f"{summary['reverted_events']:,}")
+        if summary['reverted_events'] > 0:
+            self.logger.metric("Mean recovery", f"{summary['mean_recovery']:.2%}")
+        
+        self.logger.success("Research summary complete")
+        
+        return {"summary_status": "complete"}
+    
+    # ---- Step 7: Export ----
+    def _export_results(self) -> Dict[str, Any]:
+        """Prepare export package."""
+        self.logger.info("Step 7: Preparing export package")
+        
+        exported = len(self.result.artifacts)
+        
+        self.logger.metric("Artifacts", f"{exported}")
+        
+        for name in sorted(self.result.artifacts.keys()):
+            artifact = self.result.artifacts[name]
+            if isinstance(artifact, pd.DataFrame):
+                self.logger.info(f"  {name}: {len(artifact):,} rows")
+        
+        self.logger.success("Export package complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": exported,
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        self.logger.section("Executing Pipeline (Phase 1.6 FINAL)")
+        self.logger.info("All 7 pipeline steps implemented")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 016 complete - All 7 pipeline steps finished")
+        return results
+    
+    def run(self, filepath: str, output_dir: Optional[str] = None):
+        self.dataset_name = Path(filepath).stem if filepath else "unknown"
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df: pd.DataFrame, dataset_id: str = "in_memory",
+                      output_dir: Optional[str] = None):
+        self.dataset_name = dataset_id
+        return super().run_dataframe(df, dataset_id, output_dir)

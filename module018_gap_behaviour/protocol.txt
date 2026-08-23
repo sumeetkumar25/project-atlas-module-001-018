@@ -1,0 +1,98 @@
+# atlas/modules/module018_gap_behaviour/protocol.py
+"""
+Module 018 Protocol
+Gap Behaviour
+"""
+
+from atlas.framework.protocol import (
+    ResearchProtocol,
+    ModuleCategory,
+)
+
+from .config import MODULE_VERSION
+
+
+PROTOCOL = ResearchProtocol(
+
+    module_id="018",
+
+    module_name="Gap Behaviour",
+
+    category=ModuleCategory.PRICE_BEHAVIOR,
+
+    question="How does Bitcoin behave after price gaps?",
+
+    hypothesis="Gap events exhibit statistically measurable behaviour.",
+
+    rationale=(
+        "Measure the statistical behaviour of price gaps "
+        "without assuming any trading edge."
+    ),
+
+    methodology=(
+        "Detect price gaps, classify their magnitude, "
+        "measure their frequency and distribution."
+    ),
+
+    statistics=[
+
+        "gap_count",
+
+        "gap_frequency",
+
+        "mean_gap",
+
+        "median_gap",
+
+        "std_gap",
+
+        "var_gap",
+
+        "min_gap",
+
+        "max_gap",
+
+        "p25_gap",
+
+        "p75_gap",
+
+        "p90_gap",
+
+        "p95_gap",
+
+    ],
+
+    depends_on=[],
+
+    required_datasets=[
+        "BTC_15m",
+        "BTC_1h",
+        "BTC_4h",
+    ],
+
+    author="Project Atlas",
+
+    version=MODULE_VERSION,
+
+    produces=[
+
+        "gap_events",
+
+        "gap_statistics",
+
+        "gap_distribution",
+
+    ],
+
+    limitations=[
+        "Gap detection depends on high/low placement.",
+        "Does not analyse gap fill behaviour yet.",
+    ],
+
+    future_research=[
+        "Gap fill probability",
+        "Gap behaviour by volatility regime",
+        "Gap clustering analysis",
+    ],
+
+)

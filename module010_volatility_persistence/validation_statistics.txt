@@ -1,0 +1,414 @@
+# atlas/modules/module010_volatility_persistence/validation_statistics.py
+"""
+Atlas Persistence Statistics Validator
+Permanent validation for regime duration statistics.
+
+Validates grouped statistics computed from segment durations:
+- Statistics computed per state
+- All four states always included (even if count=0)
+- Coverage and conservation checks
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Tuple, List
+
+
+def validate_persistence_statistics(stats: pd.DataFrame,
+                                     segments: pd.DataFrame,
+                                     labels: List[str]) -> Tuple[bool, List[str]]:
+    """
+    Validate persistence statistics DataFrame.
+    
+    Checks:
+    - All expected states present
+    - Required columns present
+    - Segment count sum matches total segments
+    - Weighted duration sum matches total duration
+    - All statistics are non-negative
+    - mean ≥ 1, median ≥ 1, min ≥ 1 when count > 0
+    - max ≥ min
+    
+    Args:
+        stats: Statistics DataFrame with one row per state
+        segments: Source segment DataFrame
+        labels: Expected state labels
+        
+    Returns:
+        (is_valid, list_of_warnings)
+    """
+    warnings = []
+    is_valid = True
+    
+    required_cols = ['state', 'segment_count', 'mean_duration', 'median_duration',
+                     'std_duration', 'min_duration', 'max_duration',
+                     'p95_duration', 'p99_duration']
+    missing = [c for c in required_cols if c not in stats.columns]
+    if missing:
+        warnings.append(f"Missing columns: {missing}")
+        return False, warnings
+    
+    # Check 1: All expected states present
+    present_states = set(stats['state'].unique())
+    expected_states = set(labels)
+    missing_states = expected_states - present_states
+    if missing_states:
+        warnings.append(f"Missing states in statistics: {missing_states}")
+        is_valid = False
+    
+    # Check 2: Segment count sum equals total segments
+    total_count = int(stats['segment_count'].sum())
+    actual_segments = len(segments)
+    if total_count != actual_segments:
+        warnings.append(
+            f"Segment count mismatch: stats={total_count}, actual={actual_segments}"
+        )
+        is_valid = False
+    
+    # Check 3: Weighted duration sum equals total duration
+    weighted_sum = (stats['segment_count'] * stats['mean_duration']).sum()
+    total_duration = int(segments['duration_bars'].sum()) if len(segments) > 0 else 0
+    if not np.isclose(weighted_sum, total_duration, rtol=1e-10):
+        warnings.append(
+            f"Duration conservation failed: weighted={weighted_sum:.2f}, actual={total_duration}"
+        )
+        is_valid = False
+    
+    # Check 4: All statistics non-negative where applicable
+    for _, row in stats.iterrows():
+        if row['segment_count'] > 0:
+            if row['mean_duration'] < 1:
+                warnings.append(f"{row['state']}: mean_duration < 1")
+                is_valid = False
+            if row['median_duration'] < 1:
+                warnings.append(f"{row['state']}: median_duration < 1")
+                is_valid = False
+            if row['min_duration'] < 1:
+                warnings.append(f"{row['state']}: min_duration < 1")
+                is_valid = False
+            if row['max_duration'] < row['min_duration']:
+                warnings.append(f"{row['state']}: max < min")
+                is_valid = False
+            if row['std_duration'] < 0:
+                warnings.append(f"{row['state']}: std_duration < 0")
+                is_valid = False
+            if row['p95_duration'] < row['min_duration']:
+                warnings.append(f"{row['state']}: p95 < min")
+                is_valid = False
+            if row['p99_duration'] > row['max_duration']:
+                warnings.append(f"{row['state']}: p99 > max")
+                is_valid = False
+    
+    return is_valid, warnings
+
+
+def compute_persistence_statistics(segments: pd.DataFrame,
+                                    labels: List[str]) -> pd.DataFrame:
+    """
+    Compute duration statistics per volatility state.
+    
+    Always includes all four states, even if segment_count = 0.
+    For states with no segments, statistics are NaN or 0 as appropriate.
+    
+    Args:
+        segments: Segment DataFrame from detect_segments()
+        labels: All expected state labels
+        
+    Returns:
+        DataFrame with one row per state, columns:
+        state, segment_count, mean_duration, median_duration,
+        std_duration, min_duration, max_duration,
+        p95_duration, p99_duration
+    """
+    rows = []
+    
+    for label in labels:
+        state_segments = segments[segments['state'] == label]
+        count = len(state_segments)
+        
+        if count == 0:
+            rows.append({
+                'state': label,
+                'segment_count': 0,
+                'mean_duration': np.nan,
+                'median_duration': np.nan,
+                'std_duration': np.nan,
+                'min_duration': np.nan,
+                'max_duration': np.nan,
+                'p95_duration': np.nan,
+                'p99_duration': np.nan,
+            })
+            continue
+        
+        durations = state_segments['duration_bars'].values
+        
+        rows.append({
+            'state': label,
+            'segment_count': count,
+            'mean_duration': float(np.mean(durations)),
+            'median_duration': float(np.median(durations)),
+            'std_duration': float(np.std(durations, ddof=1)) if count > 1 else 0.0,
+            'min_duration': int(np.min(durations)),
+            'max_duration': int(np.max(durations)),
+            'p95_duration': float(np.percentile(durations, 95)),
+            'p99_duration': float(np.percentile(durations, 99)),
+        })
+    
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# Unit Tests
+# ============================================================
+
+def test_known_durations():
+    """
+    Test A: Known durations produce correct statistics.
+    
+    Low: [2, 4, 6] → mean=4, median=4, min=2, max=6
+    """
+    segments = pd.DataFrame({
+        'state': ['Low', 'Low', 'Low'],
+        'duration_bars': [2, 4, 6]
+    })
+    labels = ["Low", "Normal", "High", "Extreme"]
+    
+    stats = compute_persistence_statistics(segments, labels)
+    
+    low = stats[stats['state'] == 'Low'].iloc[0]
+    assert low['segment_count'] == 3
+    assert low['mean_duration'] == 4.0
+    assert low['median_duration'] == 4.0
+    assert low['min_duration'] == 2
+    assert low['max_duration'] == 6
+    
+    return True
+
+
+def test_single_segment():
+    """
+    Test B: Single segment → mean=median=value, std=0.
+    
+    High: [10] → mean=10, median=10, std=0
+    """
+    segments = pd.DataFrame({
+        'state': ['High'],
+        'duration_bars': [10]
+    })
+    labels = ["Low", "Normal", "High", "Extreme"]
+    
+    stats = compute_persistence_statistics(segments, labels)
+    
+    high = stats[stats['state'] == 'High'].iloc[0]
+    assert high['segment_count'] == 1
+    assert high['mean_duration'] == 10.0
+    assert high['median_duration'] == 10.0
+    assert high['std_duration'] == 0.0
+    assert high['min_duration'] == 10
+    assert high['max_duration'] == 10
+    
+    return True
+
+
+def test_missing_state():
+    """
+    Test C: Missing state → segment_count=0, statistics are NaN.
+    
+    All four states always included, even with zero segments.
+    """
+    segments = pd.DataFrame({
+        'state': ['Low', 'Normal', 'High'],
+        'duration_bars': [5, 3, 7]
+    })
+    labels = ["Low", "Normal", "High", "Extreme"]
+    
+    stats = compute_persistence_statistics(segments, labels)
+    
+    assert len(stats) == 4, f"Expected 4 states, got {len(stats)}"
+    
+    extreme = stats[stats['state'] == 'Extreme'].iloc[0]
+    assert extreme['segment_count'] == 0
+    assert pd.isna(extreme['mean_duration'])
+    assert pd.isna(extreme['median_duration'])
+    
+    return True
+
+
+def test_coverage():
+    """
+    Test D: Sum of segment_counts = total number of segments.
+    """
+    np.random.seed(42)
+    labels = ["Low", "Normal", "High", "Extreme"]
+    n = 200
+    
+    segments = pd.DataFrame({
+        'state': [np.random.choice(labels) for _ in range(n)],
+        'duration_bars': np.random.randint(1, 50, n)
+    })
+    
+    stats = compute_persistence_statistics(segments, labels)
+    
+    assert stats['segment_count'].sum() == n, \
+        f"Count sum {stats['segment_count'].sum()} != {n}"
+    
+    return True
+
+
+def test_duration_conservation():
+    """
+    Test E: Weighted sum of mean durations = total duration bars.
+    """
+    np.random.seed(42)
+    labels = ["Low", "Normal", "High", "Extreme"]
+    n = 200
+    
+    segments = pd.DataFrame({
+        'state': [np.random.choice(labels) for _ in range(n)],
+        'duration_bars': np.random.randint(1, 50, n)
+    })
+    
+    stats = compute_persistence_statistics(segments, labels)
+    
+    total_duration = int(segments['duration_bars'].sum())
+    weighted_sum = 0
+    for _, row in stats.iterrows():
+        if row['segment_count'] > 0:
+            weighted_sum += row['segment_count'] * row['mean_duration']
+    
+    assert np.isclose(weighted_sum, total_duration, rtol=1e-10), \
+        f"Weighted sum {weighted_sum:.2f} != total {total_duration}"
+    
+    return True
+
+
+def test_reference_implementation():
+    """
+    Test F: Compare with independent pandas groupby implementation.
+    """
+    np.random.seed(42)
+    labels = ["Low", "Normal", "High", "Extreme"]
+    n = 200
+    
+    segments = pd.DataFrame({
+        'state': [np.random.choice(labels) for _ in range(n)],
+        'duration_bars': np.random.randint(1, 50, n)
+    })
+    
+    atlas_stats = compute_persistence_statistics(segments, labels)
+    
+    # Independent reference using pandas groupby
+    ref = segments.groupby('state')['duration_bars'].agg([
+        ('segment_count', 'count'),
+        ('mean_duration', 'mean'),
+        ('median_duration', 'median'),
+        ('std_duration', lambda x: x.std(ddof=1) if len(x) > 1 else 0.0),
+        ('min_duration', 'min'),
+        ('max_duration', 'max'),
+        ('p95_duration', lambda x: np.percentile(x, 95)),
+        ('p99_duration', lambda x: np.percentile(x, 99)),
+    ]).reset_index()
+    
+    # Ensure all states present in reference
+    for label in labels:
+        if label not in ref['state'].values:
+            ref = pd.concat([ref, pd.DataFrame([{
+                'state': label, 'segment_count': 0,
+                'mean_duration': np.nan, 'median_duration': np.nan,
+                'std_duration': np.nan, 'min_duration': np.nan,
+                'max_duration': np.nan, 'p95_duration': np.nan,
+                'p99_duration': np.nan
+            }])], ignore_index=True)
+    
+    # Compare each state
+    for label in labels:
+        atlas_row = atlas_stats[atlas_stats['state'] == label].iloc[0]
+        ref_row = ref[ref['state'] == label].iloc[0]
+        
+        assert atlas_row['segment_count'] == ref_row['segment_count'], \
+            f"{label}: count mismatch"
+        
+        if atlas_row['segment_count'] > 0:
+            assert np.isclose(atlas_row['mean_duration'], ref_row['mean_duration'], rtol=1e-10), \
+                f"{label}: mean mismatch"
+            assert np.isclose(atlas_row['median_duration'], ref_row['median_duration'], rtol=1e-10), \
+                f"{label}: median mismatch"
+            assert np.isclose(atlas_row['min_duration'], ref_row['min_duration'], rtol=1e-10), \
+                f"{label}: min mismatch"
+            assert np.isclose(atlas_row['max_duration'], ref_row['max_duration'], rtol=1e-10), \
+                f"{label}: max mismatch"
+    
+    return True
+
+
+def test_non_negative_statistics():
+    """
+    Test G: All statistics satisfy basic constraints.
+    """
+    np.random.seed(42)
+    labels = ["Low", "Normal", "High", "Extreme"]
+    n = 200
+    
+    segments = pd.DataFrame({
+        'state': [np.random.choice(labels) for _ in range(n)],
+        'duration_bars': np.random.randint(1, 50, n)
+    })
+    
+    stats = compute_persistence_statistics(segments, labels)
+    
+    for _, row in stats.iterrows():
+        if row['segment_count'] > 0:
+            assert row['mean_duration'] >= 1, f"{row['state']}: mean < 1"
+            assert row['median_duration'] >= 1, f"{row['state']}: median < 1"
+            assert row['min_duration'] >= 1, f"{row['state']}: min < 1"
+            assert row['max_duration'] >= row['min_duration'], f"{row['state']}: max < min"
+            assert row['std_duration'] >= 0, f"{row['state']}: std < 0"
+            assert row['p95_duration'] >= row['min_duration'], f"{row['state']}: p95 < min"
+            assert row['p99_duration'] <= row['max_duration'], f"{row['state']}: p99 > max"
+    
+    return True
+
+
+def run_all_validation_tests():
+    """Run all persistence statistics validation tests"""
+    print("\n" + "=" * 60)
+    print("ATLAS PERSISTENCE STATISTICS VALIDATOR - UNIT TESTS")
+    print("=" * 60)
+    print("  Policy: All 4 states always included (even if count=0)")
+    
+    tests = [
+        ("Known Durations [2,4,6]", test_known_durations),
+        ("Single Segment", test_single_segment),
+        ("Missing State (count=0)", test_missing_state),
+        ("Coverage Check", test_coverage),
+        ("Duration Conservation", test_duration_conservation),
+        ("Reference Implementation", test_reference_implementation),
+        ("Non-Negative Statistics", test_non_negative_statistics),
+    ]
+    
+    results = {}
+    for name, test_func in tests:
+        try:
+            test_func()
+            results[name] = True
+            print(f"  ✓ {name}")
+        except AssertionError as e:
+            results[name] = False
+            print(f"  ✗ {name}: {e}")
+        except Exception as e:
+            results[name] = False
+            print(f"  ✗ {name}: {type(e).__name__}: {e}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    print("=" * 60)
+    
+    return passed == total
+
+
+if __name__ == "__main__":
+    success = run_all_validation_tests()
+    import sys
+    sys.exit(0 if success else 1)

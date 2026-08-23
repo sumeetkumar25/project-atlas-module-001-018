@@ -1,0 +1,33 @@
+# atlas/modules/module017_volume_behaviour/config.py
+"""
+Module 017 Configuration
+Volume Behaviour
+"""
+
+MODULE_ID = "017"
+
+MODULE_NAME = "Volume Behaviour"
+
+MODULE_VERSION = "1.0.0"
+
+# ---------- Normalization ----------
+
+NORMALIZATION_WINDOW = 100
+
+# ---------- Percentile ----------
+
+PERCENTILE_WINDOW = 252
+
+# ---------- Regime Thresholds ----------
+
+VERY_LOW = 20
+
+LOW = 40
+
+NORMAL = 60
+
+HIGH = 80
+
+# ---------- Segments ----------
+
+MIN_SEGMENT_LENGTH = 1

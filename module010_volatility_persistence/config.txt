@@ -1,0 +1,34 @@
+# atlas/modules/module010_volatility_persistence/config.py
+"""
+Module 010 Configuration
+Volatility Persistence Analysis
+"""
+
+MODULE_ID = "010"
+MODULE_NAME = "Volatility Persistence"
+MODULE_VERSION = "0.4.0-phase3.1"
+
+# Rolling window for volatility calculation
+WINDOW = 20
+
+# Return calculation method
+RETURN_TYPE = "log"
+
+# Volatility calculation method
+VOLATILITY_METHOD = "rolling_std"
+
+# Percentile calculation
+PERCENTILE_METHOD = "rolling"
+PERCENTILE_WINDOW = 252
+
+# Percentile thresholds for regime classification
+PERCENTILE_LEVELS = [25, 75, 95]
+
+# Minimum consecutive bars to form a regime segment
+MIN_SEGMENT_LENGTH = 1
+
+# Regime labels (updated: Medium → Normal)
+REGIME_LABELS = ["Low", "Normal", "High", "Extreme"]
+
+# Transition matrix lookahead
+TRANSITION_LOOKAHEAD = 1
